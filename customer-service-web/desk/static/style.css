@@ -1338,3 +1338,11 @@ td:first-child {
  .goods-image, .goods-placeholder, .goods-image img { width: 56px; height: 56px; flex-basis: 56px; }
 }
 @media (max-width: 540px) { .bubble-row > .message-body { max-width: 100%; } .buyer-id { font-size: 9px; } }
+
+.shop-maintenance { display: flex; justify-content: space-between; gap: 8px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.shop-export-status { padding: 12px; margin-top: 14px; background: #f5f8ff; border-radius: 9px; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.shop-export-status > strong, .shop-export-status > span { display: block; }
+.shop-export-status > span { color: #8493aa; }
+.export-download { color: #426ad4; text-decoration: underline; display: inline-block; margin-top: 7px; }
+.deleted-shop { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.deleted-shops { margin-bottom: 18px; }

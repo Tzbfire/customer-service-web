@@ -123,9 +123,14 @@ class Channels:
         if not user.get("id") or not merchant.get("mallId"):
             raise ChannelError("未取得店铺身份，请确认使用商家后台有效登录态。")
         shop = self.store.one("SELECT * FROM shops WHERE id=?", (shop_id,))
+        if not shop or shop.get("deleted_at"):
+            raise ChannelError("店铺已删除，请先恢复店铺。")
         if shop.get("platform_shop_id") and shop["platform_shop_id"] != str(merchant["mallId"]):
             raise ChannelError("当前登录的店铺与原绑定店铺不同，请新建店铺后连接。")
         await self.stop(shop_id)
+        current = self.store.one("SELECT deleted_at FROM shops WHERE id=?", (shop_id,))
+        if not current or current["deleted_at"]:
+            raise ChannelError("店铺已删除，请先恢复店铺。")
         if shop.get("platform_user_id") != str(user["id"]):
             self.store.execute("DELETE FROM pdd_sync WHERE shop_id=?", (shop_id,))
             self.store.execute("DELETE FROM settings WHERE key=?", (f"pdd.protocol:{shop_id}",))
@@ -142,8 +147,8 @@ class Channels:
         self.states[shop_id] = {"status": "offline", "detail": "登录态已保存，可以连接消息服务。"}
 
     def cookies(self, shop_id):
-        shop = self.store.one("SELECT cookies FROM shops WHERE id=?", (shop_id,))
-        if not shop or not shop["cookies"]:
+        shop = self.store.one("SELECT cookies,deleted_at FROM shops WHERE id=?", (shop_id,))
+        if not shop or shop.get("deleted_at") or not shop["cookies"]:
             raise ChannelError("请先登录并绑定拼多多店铺。")
         return normalize_cookies(self.store.decrypt(shop["cookies"]))
 
@@ -273,6 +278,9 @@ class Channels:
                 queue.task_done()
 
     async def receive(self, shop_id, item):
+        shop = self.store.one("SELECT deleted_at FROM shops WHERE id=?", (shop_id,))
+        if not shop or shop["deleted_at"]:
+            return
         role = item.get("role", "customer")
         presentation = item.get("presentation", {})
         with self.store.connect() as db:
@@ -433,6 +441,10 @@ class Channels:
                 raise ChannelError("发送标识重复，请刷新页面。")
             return existing
         conversation = self.store.one("SELECT * FROM conversations WHERE id=?", (conversation_id,))
+        if not self.store.one(
+            "SELECT id FROM shops WHERE id=? AND deleted_at IS NULL", (conversation["shop_id"],)
+        ):
+            raise ChannelError("店铺已删除，不能发送消息。")
         message_id = self.store.execute(
             "INSERT INTO messages(conversation_id,role,content,state,sources,"
             "request_key,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",

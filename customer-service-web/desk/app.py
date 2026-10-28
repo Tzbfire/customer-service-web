@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from .channels import ChannelError, Channels
 from .history import HistoryService, HistoryConflict
+from .exports import Exports, ExportConflict
 from .message_content import message_preview
 from .pdd_protocol import ProtocolError
 from .knowledge import ALLOWED, MAX_FILE, MAX_TEXT, Knowledge, file_hash
@@ -40,6 +41,14 @@ class TeamMember(Credentials):
 
 class ShopInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+
+
+class ExportInput(BaseModel):
+    scope: Literal["platform", "local"] = "platform"
+
+
+class DeleteShopInput(BaseModel):
+    confirm_name: str = Field(min_length=1, max_length=100)
 
 
 class ShopMode(BaseModel):
@@ -93,6 +102,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     knowledge = Knowledge(store, model)
     channels = Channels(store, knowledge, channel_transport)
     history = HistoryService(store, channels)
+    exports = Exports(store, history)
     pending = set()
     attempts = {}
 
@@ -105,6 +115,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await exports.shutdown()
         await channels.shutdown()
         for task in list(pending):
             task.cancel()
@@ -114,6 +125,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     app = FastAPI(title="知店客服工作台", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.knowledge, app.state.channels = store, knowledge, channels
     app.state.pending = pending
+    app.state.exports = exports
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
@@ -171,20 +183,22 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
 
     def shop_exists(shop_id):
         shop = store.one("SELECT * FROM shops WHERE id=?", (shop_id,))
-        if not shop:
-            raise HTTPException(404, "店铺不存在。")
+        if not shop or shop.get("deleted_at"):
+            raise HTTPException(404, "店铺不存在或已删除。")
         return shop
 
     def document_exists(document_id):
         document = store.one("SELECT * FROM documents WHERE id=?", (document_id,))
         if not document:
             raise HTTPException(404, "资料不存在。")
+        shop_exists(document["shop_id"])
         return document
 
     def conversation_exists(conversation_id):
         row = store.one("SELECT * FROM conversations WHERE id=?", (conversation_id,))
         if not row:
             raise HTTPException(404, "会话不存在。")
+        shop_exists(row["shop_id"])
         return row
 
     def check_password(credentials):
@@ -297,7 +311,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     @app.get("/api/shops")
     async def shops(user=Depends(current_user)):
         rows = store.all(
-            "SELECT id,name,platform_shop_id,platform_user_id,mode,created_at FROM shops ORDER BY id"
+            "SELECT id,name,platform_shop_id,platform_user_id,mode,created_at FROM shops WHERE deleted_at IS NULL ORDER BY id"
         )
         for row in rows:
             row["connection"] = channels.states.get(
@@ -305,7 +319,115 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
             )
             row["login"] = channels.login_states.get(row["id"], {"status": "idle", "detail": ""})
             row["protocol"] = channels.protocol_report(row["id"])
+            if user["role"] == "admin":
+                row["export"] = exports.latest(row["id"])
         return rows
+
+    @app.get("/api/shops/deleted")
+    async def deleted_shops(user=Depends(administrator)):
+        return store.all(
+            "SELECT id,name,platform_shop_id,deleted_at FROM shops WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+        )
+
+    @app.post("/api/shops/{shop_id}/restore")
+    async def restore_shop(shop_id: int, user=Depends(administrator)):
+        shop = store.one("SELECT * FROM shops WHERE id=? AND deleted_at IS NOT NULL", (shop_id,))
+        if not shop:
+            raise HTTPException(404, "已删除店铺不存在。")
+        store.execute("UPDATE shops SET deleted_at=NULL WHERE id=?", (shop_id,))
+        store.audit(user["id"], "shop.restore", str(shop_id))
+        return {"ok": True}
+
+    @app.delete("/api/shops/{shop_id}")
+    async def delete_shop(shop_id: int, value: DeleteShopInput, user=Depends(administrator)):
+        shop = shop_exists(shop_id)
+        if value.confirm_name != shop["name"]:
+            raise HTTPException(400, "店铺名称不匹配，请完整输入店铺名称。")
+        job = exports.latest(shop_id)
+        if job and job["status"] == "running":
+            raise HTTPException(409, "店铺正在导出，请先等待完成或暂停导出。")
+        with store.connect() as db:
+            sending = db.execute(
+                "SELECT m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.shop_id=? AND m.state='sending'",
+                (shop_id,),
+            ).fetchone()
+            parsing = db.execute(
+                "SELECT id FROM documents WHERE shop_id=? AND state='parsing'", (shop_id,)
+            ).fetchone()
+            if sending or parsing:
+                raise HTTPException(409, "店铺还有正在发送的消息或正在解析的资料，请完成后再删除。")
+            db.execute("UPDATE shops SET deleted_at=?,cookies='' WHERE id=?", (time(), shop_id))
+        await channels.stop(shop_id)
+        await channels.cancel_login(shop_id)
+        tasks = [task for key, task in channels.profiles.pending.items() if key[0] == shop_id]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        channels.states.pop(shop_id, None)
+        channels.login_states.pop(shop_id, None)
+        store.execute("DELETE FROM settings WHERE key=?", (f"pdd.protocol:{shop_id}",))
+        store.execute("DELETE FROM pdd_sync WHERE shop_id=?", (shop_id,))
+        store.audit(user["id"], "shop.delete", str(shop_id))
+        return {"ok": True, "recoverable": True}
+
+    def export_exists(shop_id, export_id):
+        shop_exists(shop_id)
+        job = store.one("SELECT * FROM exports WHERE id=? AND shop_id=?", (export_id, shop_id))
+        if not job:
+            raise HTTPException(404, "导出任务不存在。")
+        return job
+
+    @app.post("/api/shops/{shop_id}/exports")
+    async def start_export(shop_id: int, value: ExportInput, user=Depends(administrator)):
+        shop_exists(shop_id)
+        job = exports.start(shop_id, value.scope)
+        store.audit(user["id"], "shop.export", job["id"])
+        return job
+
+    @app.get("/api/shops/{shop_id}/exports/{export_id}")
+    async def export_status(shop_id: int, export_id: str, user=Depends(administrator)):
+        return export_exists(shop_id, export_id)
+
+    @app.post("/api/shops/{shop_id}/exports/{export_id}/resume")
+    async def resume_export(shop_id: int, export_id: str, user=Depends(administrator)):
+        job = export_exists(shop_id, export_id)
+        try:
+            latest = exports.latest(shop_id)
+            if latest and latest["status"] == "running" and latest["id"] != export_id:
+                raise ExportConflict("此店铺已有运行中的导出任务。")
+            exports.resume(job)
+        except ExportConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"ok": True}
+
+    @app.post("/api/shops/{shop_id}/exports/{export_id}/cancel")
+    async def cancel_export(shop_id: int, export_id: str, user=Depends(administrator)):
+        export_exists(shop_id, export_id)
+        await exports.cancel(export_id)
+        return {"ok": True}
+
+    @app.get("/api/shops/{shop_id}/exports/{export_id}/download")
+    async def download_export(
+        shop_id: int, export_id: str, format: Literal["zip", "markdown"] = "zip", user=Depends(administrator)
+    ):
+        job = export_exists(shop_id, export_id)
+        if job["status"] != "done":
+            raise HTTPException(409, "导出尚未完成，请等待完成后再下载。")
+        if format == "markdown":
+            path = exports.workspace(job["id"]) / "messages.md"
+            if not path.is_file():
+                raise HTTPException(409, "此旧导出尚未包含 Markdown，请重新导出。")
+            return FileResponse(
+                path,
+                media_type="text/markdown; charset=utf-8",
+                filename=f"shop-{shop_id}-conversations-{export_id[:8]}.md",
+            )
+        path = exports.workspace(job["id"]) / "conversations.zip"
+        if not path.is_file():
+            raise HTTPException(404, "导出文件已丢失，请新建导出。")
+        return FileResponse(
+            path, media_type="application/zip", filename=f"shop-{shop_id}-conversations-{export_id[:8]}.zip"
+        )
 
     @app.post("/api/shops")
     async def create_shop(value: ShopInput, user=Depends(administrator)):

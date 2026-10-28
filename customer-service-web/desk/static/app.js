@@ -454,15 +454,56 @@ function sourceCards(sources) {
     )
     .join("");
 }
+function exportStatusHTML(shop) {
+  const job = shop.export;
+  if (!job) return "";
+  const labels = {running:"正在导出",done:"导出完成",failed:"导出未完成",cancelled:"导出已暂停",interrupted:"导出已中断"};
+  const phase = {discover:"读取会话列表",messages:"读取聊天记录",package:"生成压缩包",done:"可以下载"}[job.phase] || "准备导出";
+  return `<div class="shop-export-status" role="status"><strong>${esc(job.status === "done" && job.scope === "local" ? "本地记录已导出（不含平台历史）" : labels[job.status] || job.status)}</strong><span>${job.scope === "local" ? "仅本地记录" : "平台历史 + 本地记录"} · ${esc(phase)} · ${job.completed}/${job.conversations} 个会话 · ${job.messages} 条消息</span>${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ""}<div class="flex">${job.status === "done" ? `<a class="export-download" href="/api/shops/${shop.id}/exports/${job.id}/download" download>${job.scope === "local" ? "下载本地记录 ZIP" : "下载全部历史对话 ZIP"}</a><a class="export-download" href="/api/shops/${shop.id}/exports/${job.id}/download?format=markdown" download>下载 Markdown</a>` : job.status === "running" ? `<button class="quiet small" data-action="cancel-export" data-id="${shop.id}" data-export="${job.id}">暂停导出</button>` : `<button class="small" data-action="resume-export" data-id="${shop.id}" data-export="${job.id}">继续导出</button>`}</div></div>`;
+}
+function openShopExport(id) {
+  const shop = state.shops.find(item => item.id === Number(id));
+  if (!shop) return;
+  modal("导出全部对话", `<form id="export-shop-form"><p><strong>${esc(shop.name)}</strong></p><label class="check"><input type="radio" name="scope" value="platform" ${shop.platform_shop_id ? "checked" : ""}>平台可获取的全部历史 + 本地记录</label><label class="check"><input type="radio" name="scope" value="local" ${shop.platform_shop_id ? "" : "checked"}>仅导出本地保存的全部对话</label><div class="notice">导出 ZIP 含 Markdown、CSV、JSON 和 HTML 聊天记录，也可单独下载全部对话的 .md 文件。图片、视频保留在线地址，不下载媒体原文件。<br>平台历史需要有效店铺登录态；平台返回范围受当前账号权限和历史保留范围限制。导出不会调用 AI 或向买家发送消息。</div><div class="form-actions"><button type="button" data-action="close-modal">取消</button><button class="primary" type="submit">开始导出</button></div></form>`);
+  $("#export-shop-form").addEventListener("submit", event => {
+    event.preventDefault();
+    busy($("button[type=submit]",event.target), async () => {
+      await post(`/api/shops/${id}/exports`, {scope:new FormData(event.target).get("scope")});
+      closeModal();
+      await renderShops();
+      toast("导出已开始，可在店铺卡片查看进度。");
+    });
+  });
+}
+function openDeleteShop(id) {
+  const shop = state.shops.find(item => item.id === Number(id));
+  if (!shop) return;
+  modal("删除店铺", `<form id="delete-shop-form"><p>删除 <strong>${esc(shop.name)}</strong>？</p><div class="notice">将停止消息连接、关闭登录窗口并清除保存的店铺登录态。聊天记录和知识库会保留在“已删除店铺”，可以恢复；恢复后需重新登录拼多多。不会删除拼多多平台上的店铺或消息。</div><div class="field"><label for="delete-shop-name">输入完整店铺名称确认</label><input id="delete-shop-name" name="confirm_name" required autocomplete="off" placeholder="${esc(shop.name)}"></div><div class="form-actions"><button type="button" data-action="close-modal">取消</button><button class="danger" type="submit">确认删除店铺</button></div></form>`);
+  $("#delete-shop-form").addEventListener("submit", event => {
+    event.preventDefault();
+    busy($("button[type=submit]",event.target), async () => {
+      await api(`/api/shops/${id}`, {method:"DELETE",body:JSON.stringify({confirm_name:new FormData(event.target).get("confirm_name")})});
+      closeModal();
+      state.inboxEpoch = (state.inboxEpoch || 0) + 1;
+      state.conversationId = null; state.localTranscript = null; state.historyItems = []; state.documents = [];
+      await loadShops(); shell(); await renderShops();
+      toast("店铺已移入已删除列表，资料和对话已保留。");
+    });
+  });
+}
+async function openDeletedShops() {
+  const deleted = await api("/api/shops/deleted");
+  modal("已删除店铺", deleted.length ? `<div class="deleted-shops">${deleted.map(shop => `<div class="deleted-shop"><div><strong>${esc(shop.name)}</strong><p class="filemeta">${shop.platform_shop_id ? "店铺 ID：" + esc(shop.platform_shop_id) + " · " : ""}删除于 ${when(shop.deleted_at)}</p></div><button class="small" data-action="restore-shop" data-id="${shop.id}">恢复店铺</button></div>`).join("")}</div><div class="notice">恢复后聊天和知识库可继续使用，需重新登录拼多多才能连接消息。</div>` : empty("暂无已删除店铺","删除的店铺可在此恢复。"), true);
+}
 async function renderShops() {
   await loadShops();
   $("#page").innerHTML =
     heading(
       "店铺连接",
       "在独立浏览器完成登录，系统自动识别店铺。",
-      '<button class="primary" data-action="new-shop">' +
+      '<div class="flex"><button data-action="deleted-shops">已删除店铺</button><button class="primary" data-action="new-shop">' +
         icon("plus") +
-        " 新建店铺</button>",
+        " 新建店铺</button></div>",
     ) +
     `<div class="grid3">${state.shops
       .map((shop) => {
@@ -489,7 +530,7 @@ async function renderShops() {
           ${active ? `<button class="small" data-action="cancel-login" data-id="${shop.id}">取消登录</button><button class="quiet small" data-action="restart-login" data-id="${shop.id}">重新打开</button>` : ""}
           <button class="small" data-action="${shop.connection.status === "connected" ? "disconnect-shop" : "connect-shop"}" data-id="${shop.id}">${shop.connection.status === "connected" ? "断开连接" : "连接消息"}</button>
           <button class="quiet small" data-action="check-protocol" data-id="${shop.id}">检查协议</button>
-          <button class="quiet small" data-action="bind-shop" data-id="${shop.id}">导入登录态</button></div></section>`;
+          <button class="quiet small" data-action="bind-shop" data-id="${shop.id}">导入登录态</button></div><div class="shop-maintenance"><button class="small" data-action="export-shop" data-id="${shop.id}" ${shop.export?.status === "running" ? "disabled" : ""}>导出全部历史对话</button><button class="quiet small danger" data-action="delete-shop" data-id="${shop.id}" ${shop.export?.status === "running" ? "disabled" : ""}>删除店铺</button></div>${exportStatusHTML(shop)}</section>`;
       })
       .join(
         "",
@@ -950,6 +991,22 @@ document.addEventListener("click", async (event) => {
     action = button.dataset.action;
   await busy(button, async () => {
     switch (action) {
+      case "export-shop":
+        openShopExport(id); break;
+      case "delete-shop":
+        openDeleteShop(id); break;
+      case "deleted-shops":
+        await openDeletedShops(); break;
+      case "restore-shop":
+        await post(`/api/shops/${id}/restore`);
+        closeModal(); await loadShops(); shell(); await renderShops();
+        toast("店铺已恢复，请重新登录以连接消息。"); break;
+      case "cancel-export":
+        await post(`/api/shops/${id}/exports/${button.dataset.export}/cancel`);
+        await renderShops(); break;
+      case "resume-export":
+        await post(`/api/shops/${id}/exports/${button.dataset.export}/resume`);
+        await renderShops(); break;
       case "preview-message-image":
         previewImage(button.dataset.imageUrl);
         break;

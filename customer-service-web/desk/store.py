@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS pdd_sync (
  seq_type INTEGER NOT NULL, seq_id INTEGER NOT NULL, updated_at REAL NOT NULL,
  PRIMARY KEY(shop_id,seq_type)
 );
+CREATE TABLE IF NOT EXISTS exports (
+ id TEXT PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), scope TEXT NOT NULL,
+ status TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'discover', page INTEGER NOT NULL DEFAULT 1,
+ conversations INTEGER NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0,
+ messages INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+ created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
  id INTEGER PRIMARY KEY, user_id INTEGER, action TEXT NOT NULL, detail TEXT NOT NULL,
  created_at REAL NOT NULL
@@ -91,6 +98,9 @@ class Store:
             for name in ("platform_conv_id", "platform_chat_type"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE conversations ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            shop_columns = {row[1] for row in db.execute("PRAGMA table_info(shops)")}
+            if "deleted_at" not in shop_columns:
+                db.execute("ALTER TABLE shops ADD COLUMN deleted_at REAL")
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             if "presentation" not in message_columns:
                 db.execute("ALTER TABLE messages ADD COLUMN presentation TEXT NOT NULL DEFAULT '{}'")
