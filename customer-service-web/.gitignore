@@ -1,0 +1,12 @@
+.venv/
+.data/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+.env
+.data-*/
+
+# Public third-party browser captures remain local; metadata and findings are tracked.
+evidence/**/*.js
+evidence/**/*.html

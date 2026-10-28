@@ -1,0 +1,21 @@
+# Reference repositories cloned for comparison; managed independently.
+/Customer-Agent/
+/pdd-customer-service-sdk/
+
+# Local protocol captures can contain merchant account information.
+/customer-service-web/evidence/
+
+# Runtime, credentials, browser profiles and local environments.
+**/.data/
+**/.data-*/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.pyc
+**/.env
+**/.env.*
+!**/.env.example
+
+# Independent application repository
+/merchant-desk/
