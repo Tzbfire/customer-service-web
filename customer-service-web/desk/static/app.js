@@ -289,22 +289,78 @@ async function renderKnowledge() {
       "店铺知识库",
       "把你已有的商品资料，整理成 AI 回答的依据。",
       admin()
-        ? '<button class="primary" data-action="open-upload">' +
+        ? '<div class="flex"><button class="primary" data-action="open-upload">' +
             icon("plus") +
-            " 上传资料</button>"
+            ' 上传资料</button><button data-action="sync-products">同步店铺商品并入库</button></div>'
         : "",
     ) +
-    `<section class="panel"><div class="panel-head"><h2>资料库 <span class="muted smalltext">${state.documents.length} 份资料</span></h2><span class="badge blue">按当前店铺检索</span></div><div class="filters"><button data-filter="all" class="selected">全部资料</button><button data-filter="ready">已入库</button><button data-filter="draft">待审核</button><input id="document-search" aria-label="搜索资料" placeholder="搜索标题或商品 ID"></div><div id="document-list"></div></section><div class="gap"></div><div class="grid2"><div class="notice"><strong>商品资料</strong><br>适合规格、尺寸、材质、使用方法和注意事项。请关联商品 ID，避免不同商品的知识混用。</div><div class="notice"><strong>通用政策</strong><br>适合发货说明、退换货政策和店铺常见问答。作为本店所有商品的共同参考。</div></div>`;
+    `<section class="panel product-library"><div class="panel-head"><div><h2>店铺商品</h2><p class="filemeta">商品名称、规格与详情同步到本地，按商品 ID 供 AI 检索。详情图文字需识别后审核。</p></div></div><div id="product-catalog" class="panel-body">正在读取本地商品…</div></section><div class="gap"></div><section class="panel"><div class="panel-head"><h2>资料库 <span id="knowledge-document-count" class="muted smalltext">${state.documents.length} 份资料</span></h2><span class="badge blue">按当前店铺检索</span></div><div class="filters"><button data-filter="all" class="selected">全部资料</button><button data-filter="ready">已入库</button><button data-filter="draft">待审核</button><input id="document-search" aria-label="搜索资料" placeholder="搜索标题或商品 ID"></div><div id="document-list"></div></section><div class="gap"></div><div class="grid2"><div class="notice"><strong>商品资料</strong><br>适合规格、尺寸、材质、使用方法和注意事项。请关联商品 ID，避免不同商品的知识混用。</div><div class="notice"><strong>通用政策</strong><br>适合发货说明、退换货政策和店铺常见问答。作为本店所有商品的共同参考。</div></div>`;
   state.filter = "all";
   state.search = "";
   drawDocuments();
+  await refreshProductCatalog();
   $("#document-search").addEventListener("input", (event) => {
     state.search = event.target.value;
     drawDocuments();
   });
 }
+async function refreshProductCatalog() {
+  const shopId=state.shopId;
+  const result=await api("/api/products?shop_id="+shopId);
+  if(state.page!=="knowledge" || state.shopId!==shopId || !$("#product-catalog")) return;
+  state.productSync=result.sync;
+  state.catalogProducts=result.items;
+  const sync=result.sync;
+  const labels={running:"正在同步商品",done:"商品同步完成",partial:"部分商品同步失败",failed:"商品同步失败",interrupted:"商品同步中断"};
+  const progress=sync ? `<div class="notice product-sync-progress"><strong>${esc(labels[sync.status] || sync.status)}</strong> · 已入库 ${sync.completed}/${sync.total} 件${sync.failed ? " · 失败 "+sync.failed+" 件" : ""}${sync.error ? `<p class="inline-error">${esc(sync.error)}</p>` : ""}</div>` : "";
+  $("#product-catalog").innerHTML=progress+(result.items.length ? `<div class="catalog-grid">${result.items.map(p=>`<article class="catalog-item">${safeURL(p.thumb_url,true)?`<img class="catalog-thumb" src="${esc(safeURL(p.thumb_url,true))}" alt="商品缩略图" loading="lazy" referrerpolicy="no-referrer">`:'<span class="catalog-thumb goods-placeholder">商品</span>'}<div class="catalog-info"><strong>${esc(p.name)}</strong><div class="filemeta">商品 ID：${esc(p.goods_id)} · ${p.sku_count} 个在售 SKU · ${p.image_count} 张详情图</div><div class="filemeta">${p.price_min?esc(p.price_min+(p.price_max&&p.price_max!==p.price_min?" — "+p.price_max:""))+" · 同步参考价 · " : ""}${p.available ? p.knowledge_state === "ready" ? "商品事实已入库" : "商品事实未入库" : "本次在售列表未返回，知识已停用"}</div>${p.error?`<p class="inline-error">${esc(p.error)}</p>`:""}<div class="flex catalog-actions"><button class="quiet small" data-action="view-product" data-id="${esc(p.goods_id)}">查看本地商品</button>${p.document_id?`<button class="quiet small" data-action="view-document" data-id="${esc(p.document_id)}">查看商品知识</button>`:""}${admin() && p.available && p.image_count?`<button class="small" data-action="product-images" data-id="${esc(p.goods_id)}" ${p.image_state==="running"?"disabled":""}>${p.image_state==="running"?"正在识别详情图…":"识别详情图"}</button>`:""}${p.image_document_id?`<button class="small" data-action="view-document" data-id="${esc(p.image_document_id)}">${p.image_knowledge_state==="ready"?"查看图片知识":"审核图片知识"}</button>`:""}</div>${p.image_error?`<p class="inline-error">${esc(p.image_error)}</p>`:""}${admin()?`<div class="learning-controls"><button class="small" data-action="learning-preview" data-id="${esc(p.goods_id)}" ${p.learning?.status==="running"?"disabled":""}>聊天＋订单总结</button>${learningStatusHTML(p)}</div>`:""}</div></article>`).join("")}</div>` : empty("尚未同步商品","管理员可以从当前店铺拉取在售商品，自动建立按商品 ID 区分的知识。"));
+}
+function learningStatusHTML(product) {
+  const j=product.learning;
+  if(!j)return "";
+  const status={running:"正在整理",done:"已生成待审核总结",partial:"已生成，部分订单未知",failed:"整理未完成",interrupted:"任务已暂停"}[j.status]||j.status;
+  const phase={orders:"拉取近期与历史订单",model:"模型整理咨询",write:"写入待审核知识",done:"可审核"}[j.phase]||j.phase;
+  return `<div class="filemeta learning-progress">${esc(status)} · ${esc(phase)}<br>${j.completed}/${j.total} 个案例 · 已完成 ${j.model_batches} 批模型整理${j.failed?" · "+j.failed+" 个订单查询未完成":""}</div>${j.error?`<div class="inline-error">${esc(j.error)}</div>`:""}<div class="flex catalog-actions"><button class="quiet small" data-action="learning-evidence" data-job="${j.id}">查看案例与来源</button>${j.document_id?`<button class="small" data-action="view-document" data-id="${j.document_id}">${j.knowledge_state==="ready"?"查看总结知识":"审核总结知识"}</button>`:""}${j.status==="running"?`<button class="quiet small" data-action="learning-cancel" data-job="${j.id}">暂停总结</button>`:["failed","interrupted"].includes(j.status)?`<button class="small" data-action="learning-resume" data-job="${j.id}">继续总结</button>`:""}</div>`;
+}
+async function openLearningPreview(goodsId) {
+  const preview=await api(`/api/shops/${state.shopId}/products/${encodeURIComponent(goodsId)}/learning-preview`);
+  modal("聊天＋订单总结",`<p>此商品在 ${when(preview.snapshot_at)} 的聊天快照中关联 <strong>${preview.cases} 个咨询案例</strong>。</p><div class="notice">会读取这些买家的近期和历史订单，按当前商品核对规格、购买件数、咨询前后下单及复购。订单数据只保留必要交易字段；提交给模型的材料会隐藏买家和订单编号，并尽量隐藏联系信息。<br>预计至少 ${preview.estimated_batches} 批文字模型调用；长案例可能增加批次。结果先生成待审核资料，不自动入库，不向买家发消息。<br>当前快照可能缺少最新消息；如需最新范围，请先重新导出全部历史。${preview.truncated_cases?`<br>${preview.truncated_cases} 个长案例将选取开头和结尾片段，并标明范围限制。`:""}</div><div class="gap"></div><div class="notice">本次只生成商品知识总结，不会改变客服行为。不根据购买数量推算通用施工耗量。</div><div class="form-actions"><button data-action="close-modal">取消</button><button class="primary" data-action="learning-start" data-id="${esc(goodsId)}" ${preview.cases?"":"disabled"}>生成总结（待审核）</button></div>`);
+}
+async function showLearningEvidence(jobId,page=1) {
+  const result=await api(`/api/shops/${state.shopId}/learning/${jobId}?page=${page}`);
+  const label={customer:"买家",agent:"客服"};
+  const cases=result.cases.map(c=>`<section class="learning-case"><h3>${esc(c.case_id)} · 买家 ID ${esc(c.buyer_uid)}</h3><p>${esc(c.analysis.discussion||"尚未完成模型总结")}</p><p>面积原话：${esc(c.analysis.area_quote||"未提取到可靠原文")}${c.analysis.area_message_ref?" · 来源 "+esc(c.analysis.area_message_ref):""}</p>${c.purchases.known?`<p>该商品订单 ${c.purchases.matching_orders} 笔 · 已支付未取消 ${c.purchases.paid_orders} 笔 · 历史多笔购买：${c.purchases.repeat_ever?"是":"当前可见范围未观察到"}</p><p>咨询时间基准：${esc(c.purchases.consultation_basis)} · ${c.purchases.consultation_at?when(c.purchases.consultation_at):"未知"}<br>基准后支付订单 ${c.purchases.paid_after_consultation===null?"未知":c.purchases.paid_after_consultation+" 笔"} · 基准后再次下单：${c.purchases.repeat_after_consultation===null?"未知":c.purchases.repeat_after_consultation?"是":"未观察到"}</p><div class="table-wrap"><table><thead><tr><th>订单引用</th><th>下单时间</th><th>规格</th><th>件数</th><th>支付判断</th></tr></thead><tbody>${c.purchases.timeline.map(o=>`<tr><td>${esc(o.ref)} · ${o.source==="history"?"历史":"近期"}</td><td>${o.ordered_at?when(o.ordered_at):"未知"}</td><td>${esc(o.spec||o.sku_id||"未提供")}</td><td>${o.quantity}</td><td>${o.paid_purchase?"已支付未取消":"其他状态"} (${o.pay_status})</td></tr>`).join("")}</tbody></table></div>`:`<p class="inline-error">订单未完整获取，购买及复购未知。${esc(c.error)}</p>`}<details><summary>查看对应商品的聊天来源（${c.messages.length} 条${c.chat_truncated?"，已截取":""}）</summary>${c.messages.map(m=>`<div class="learning-source"><span class="filemeta">${esc(m.ref)} · ${esc(label[m.role]||m.role)} · ${m.at?when(m.at):"时间未知"}${m.platform_id?" · 平台消息 "+esc(m.platform_id):""}</span><p>${esc(m.content)}</p></div>`).join("")}</details></section>`).join("");
+  modal("总结案例与来源",`<div class="notice">以下订单结果按程序计算，原文与引用用于人工核对。历史购买不等于本轮咨询后的复购；不能由件数直接推算覆盖面积。</div>${cases||empty("暂无案例","请先运行总结任务。")}<div class="form-actions">${page>1?`<button data-action="learning-evidence" data-job="${jobId}" data-page-number="${page-1}">上一页</button>`:""}<span>第 ${page} 页</span>${result.has_more?`<button data-action="learning-evidence" data-job="${jobId}" data-page-number="${page+1}">下一页</button>`:""}</div>`,true);
+}
+async function showBuyerOrders() {
+  const c=state.inboxSource==="history"?state.historySelected:state.activeConversation;
+  if(!c)return;
+  modal("买家订单",'<div class="notice">正在读取近期与历史订单…</div>',true);
+  try {
+    const result=await api(`/api/shops/${state.shopId}/buyers/${encodeURIComponent(c.buyer_uid)}/orders`);
+    if(state.modal!=="买家订单")return;
+    const paid=result.orders.filter(o=>o.paid_purchase);
+    modal("买家订单",`<div class="notice">已读取近期 ${result.recent_total} 笔＋历史 ${result.history_total} 笔，去重 ${result.orders.length} 笔。按不同订单号核对复购，件数按规格分别保留。已支付未取消不代表无售后；历史范围受平台和账号权限限制。</div><div class="table-wrap"><table><thead><tr><th>下单时间 / 订单</th><th>商品 / SKU</th><th>规格与数量</th><th>支付及订单状态</th></tr></thead><tbody>${result.orders.map(o=>`<tr><td>${o.ordered_at?when(o.ordered_at):"时间未知"}<div class="filemeta">${esc(o.order_sn)} · ${o.source==="history"?"历史订单":"近期订单"}</div></td><td>${esc(o.name)}<div class="filemeta">商品 ${esc(o.goods_id)}${o.sku_id?" · SKU "+esc(o.sku_id):""}</div></td><td>${esc(o.spec||"规格未提供")}<br><strong>${o.quantity} 件</strong></td><td>${o.paid_purchase?"已支付未取消":"其他状态，需核对"}<div class="filemeta">支付 ${o.pay_status} · 订单 ${o.order_status} ${esc(o.status_text)}</div></td></tr>`).join("")}</tbody></table></div>${!result.orders.length?empty("未返回订单","仅代表当前可查询范围没有订单。"):""}<p class="filemeta">已支付未取消的可见订单 ${paid.length} 笔。不同商品不能混为同款复购。</p>`,true);
+  } catch(error) {
+    if(state.modal==="买家订单") modal("买家订单",`<div class="inline-error">${esc(error.message)}</div><p>订单未获取完整，不能判断未购买或无复购。</p>`,true);
+  }
+}
+async function viewProduct(goodsId) {
+  const result=await api(`/api/shops/${state.shopId}/products/${encodeURIComponent(goodsId)}`);
+  const p=result.payload;
+  modal("本地商品资料",`<h3>${esc(p.name)}</h3><p class="filemeta">商品 ID：${esc(p.goods_id)} · 同步于 ${when(result.updated_at)}</p>${p.description?`<p>${esc(p.description)}</p>`:""}${p.warm_tips?`<p>${esc(p.warm_tips)}</p>`:""}<p class="filemeta">分类：${esc(p.categories.join(" > "))}</p><div class="table-wrap"><table><thead><tr><th>SKU</th><th>规格</th><th>参考拼单价</th><th>状态</th></tr></thead><tbody>${p.skus.map(s=>`<tr><td>${esc(s.id)}</td><td>${esc(s.spec)}</td><td>${esc(s.price)}</td><td>${s.on_sale?"在售":"非在售"}</td></tr>`).join("")}</tbody></table></div><h3>商品详情图</h3><div class="product-gallery">${p.detail_images.filter(url=>safeURL(url,true)).map(url=>`<button type="button" class="chat-media message-image" data-action="preview-message-image" data-image-url="${esc(safeURL(url,true))}"><img src="${esc(safeURL(url,true))}" alt="商品详情图" loading="lazy" referrerpolicy="no-referrer"><span class="media-fallback">图片加载失败</span></button>`).join("")}</div><div class="notice">只有已入库的文字与规格参与 AI 检索，详情图需点击“识别详情图”后审核入库。价格和库存以平台实时页面为准。</div>`,true);
+}
+function openProductSync() {
+  modal("同步店铺商品并入库",`<p>从当前店铺读取在售商品列表、详情和 SKU，保存到本地并建立商品知识。</p><div class="notice">同步专属资料会随平台更新；手工上传的资料和人工编辑过的商品知识会保留。列表不再返回的旧商品，其同步知识会停用。<br>本次只同步结构化文字和图片地址，不调用大模型。详情图识别可随后单独执行。</div><div class="form-actions"><button data-action="close-modal">取消</button><button class="primary" data-action="confirm-product-sync">同步并入库</button></div>`);
+}
+function openProductImages(goodsId) {
+  const p=(state.catalogProducts||[]).find(p=>p.goods_id===goodsId);
+  if(!p)return;
+  modal("识别商品详情图",`<p>${esc(p.name)}</p><div class="notice">将读取此商品的 ${p.image_count} 张详情图，并发送到你已配置的看图模型进行文字识别，可能产生多次 API 调用和费用。结果先进入待审核区，确认后才用于 AI 回答。失败重试会复用已完成图片。</div><div class="form-actions"><button data-action="close-modal">取消</button><button class="primary" data-action="confirm-product-images" data-id="${esc(goodsId)}">开始识别</button></div>`);
+}
 function drawDocuments() {
   if (!$("#document-list")) return;
+  if ($("#knowledge-document-count")) $("#knowledge-document-count").textContent = `${state.documents.length} 份资料`;
   const items = state.documents.filter(
     (item) =>
       (state.filter === "all" || item.state === state.filter) &&
@@ -424,6 +480,10 @@ function renderPlayground() {
           "beforeend",
           `<div class="bubble-row"><span class="avatar">AI</span><div><div class="bubble-meta">${result.needs_human ? "建议人工确认" : "已引用知识库资料"}</div><div class="bubble">${esc(result.answer)}</div></div></div>`,
         );
+        if (result.goods_id && $("#test-goods")) {
+          $("#test-goods").value=result.goods_id;
+          state.testGoods=result.goods_id;
+        }
         state.history.push(
           { role: "user", content: question },
           { role: "assistant", content: result.answer },
@@ -432,7 +492,7 @@ function renderPlayground() {
         state.testResults.push(result);
         if ($("#test-sources"))
           $("#test-sources").innerHTML =
-            `<div class="notice ${result.needs_human ? "orange" : ""}">${esc(result.reason || "回答已生成。")}</div>` +
+            `<div class="notice ${result.needs_human ? "orange" : ""}">${result.retrieval_mode === "model_context" ? "模型理解模式 · 已调用模型" : result.model_called ? "本地关键词模式 · 已调用模型" : "本地关键词模式 · 未调用模型"}<br>${esc(result.reason || "回答已生成。")}</div>` +
             sourceCards(result.sources);
         if ($("#test-question")) $("#test-question").value = "";
       } catch (error) {
@@ -555,7 +615,7 @@ async function renderModel() {
       "连接你的大模型",
       "使用你已有的 API。商品图片识别可单独指定看图模型。",
     ) +
-    `<div class="grid2"><section class="panel"><div class="panel-head"><h2>模型连接设置</h2><span class="badge blue">Chat Completions 兼容接口</span></div><form id="model-form" class="panel-body"><div class="field"><label for="model-base">API 接口地址</label><input id="model-base" name="base_url" type="url" value="${esc(config.base_url)}" required placeholder="https://你的接口地址/v1"><small>填写服务商给出的 Base URL，也支持完整的 /chat/completions 地址。</small></div><div class="field"><label for="model-name">文字模型名称</label><input id="model-name" name="model" value="${esc(config.model)}" required placeholder="填写服务商提供的模型标识"></div><div class="field"><label for="model-key">API Key</label><input id="model-key" name="api_key" type="password" autocomplete="new-password" placeholder="${config.has_key ? "密钥已保存，留空保留原密钥" : "填写你的 API Key"}"><small>密钥加密保存在服务器，不会返回给浏览器。</small></div><label class="check"><input id="vision-enabled" name="vision_enabled" type="checkbox" ${config.vision_enabled ? "checked" : ""}>启用图片和扫描件识别</label><div class="field"><label for="vision-model">看图模型名称（选填）</label><input id="vision-model" name="vision_model" value="${esc(config.vision_model)}" placeholder="留空使用文字模型，需支持图片输入"><small>图片会通过相同的接口地址和 API Key 发送给该模型。</small></div><label class="check"><input name="allow_private" type="checkbox" ${config.allow_private ? "checked" : ""}>允许本机 / 局域网模型端点</label><div class="form-actions"><button type="button" data-action="test-model">测试已保存的连接</button><button class="primary" type="submit">保存配置${icon("check")}</button></div><div id="model-result" class="connection-status"></div></form></section><aside class="model-help"><h3>两种模型，各有所长</h3><p><strong>文字模型</strong><br>根据检索到的商品资料和上下文，生成客服回复。</p><p><strong>看图模型</strong><br>读取商品长图、参数截图和扫描 PDF，提取可编辑的文字资料。你的接口需支持 image_url 图片输入。</p><p><strong>资料如何使用</strong><br>只有你确认入库的内容才参与检索。回答时会附上引用片段，资料不足则进入人工处理。</p><p><strong>费用与数据</strong><br>模型调用使用你的 API 额度，必要的商品资料和客户问题会发送到你配置的接口。</p></aside></div>`;
+    `<div class="grid2"><section class="panel"><div class="panel-head"><h2>模型连接设置</h2><span class="badge blue">Chat Completions 兼容接口</span></div><form id="model-form" class="panel-body"><div class="field"><label for="model-base">API 接口地址</label><input id="model-base" name="base_url" type="url" value="${esc(config.base_url)}" required placeholder="https://你的接口地址/v1"><small>填写服务商给出的 Base URL，也支持完整的 /chat/completions 地址。</small></div><div class="field"><label for="model-name">文字模型名称</label><input id="model-name" name="model" value="${esc(config.model)}" required placeholder="填写服务商提供的模型标识"></div><div class="field"><label for="model-key">API Key</label><input id="model-key" name="api_key" type="password" autocomplete="new-password" placeholder="${config.has_key ? "密钥已保存，留空保留原密钥" : "填写你的 API Key"}"><small>密钥加密保存在服务器，不会返回给浏览器。</small></div><label class="check"><input id="vision-enabled" name="vision_enabled" type="checkbox" ${config.vision_enabled ? "checked" : ""}>启用图片和扫描件识别</label><div class="field"><label for="vision-model">看图模型名称（选填）</label><input id="vision-model" name="vision_model" value="${esc(config.vision_model)}" placeholder="留空使用文字模型，需支持图片输入"><small>图片会通过相同的接口地址和 API Key 发送给该模型。</small></div><div class="notice"><label class="check"><input id="use-local-keywords" name="use_local_keywords" type="checkbox" ${config.use_local_keywords !== false ? "checked" : ""}>使用本地关键词检索</label><small>开启：本地检索未命中时直接提示人工，可能跳过模型。<br>关闭：不做本地关键词筛选，将当前商品的已入库资料和前文交给模型理解；资料较多时受上下文预算限制，API 用量可能增加。<br>两种模式都只引用已入库资料，不允许编造商品事实；适用于实时接待与问答测试。</small></div><div class="gap"></div><label class="check"><input name="allow_private" type="checkbox" ${config.allow_private ? "checked" : ""}>允许本机 / 局域网模型端点</label><div class="form-actions"><button type="button" data-action="test-model">测试已保存的连接</button><button class="primary" type="submit">保存配置${icon("check")}</button></div><div id="model-result" class="connection-status"></div></form></section><aside class="model-help"><h3>两种模型，各有所长</h3><p><strong>文字模型</strong><br>根据检索到的商品资料和上下文，生成客服回复。</p><p><strong>看图模型</strong><br>读取商品长图、参数截图和扫描 PDF，提取可编辑的文字资料。你的接口需支持 image_url 图片输入。</p><p><strong>资料如何使用</strong><br>只有你确认入库的内容才参与检索。回答时会附上引用片段，资料不足则进入人工处理。</p><p><strong>费用与数据</strong><br>模型调用使用你的 API 额度，必要的商品资料和客户问题会发送到你配置的接口。</p></aside></div>`;
   $("#model-form").addEventListener("submit", (event) => {
     event.preventDefault();
     busy($("button[type=submit]", event.target), async () => {
@@ -567,6 +627,7 @@ async function renderModel() {
         vision_model: form.get("vision_model"),
         vision_enabled: form.has("vision_enabled"),
         allow_private: form.has("allow_private"),
+        use_local_keywords: form.has("use_local_keywords"),
       });
       $("#model-key").value = "";
       $("#model-key").placeholder = "密钥已保存，留空保留原密钥";
@@ -748,7 +809,7 @@ function drawLocalThread() {
   state.activeMessages = local.messages;
   $("#thread").dataset.id = id;
   $("#thread").innerHTML =
-    `<div class="thread-head flex between"><div><h3>${esc(buyerLabel(conversation))}</h3><p class="muted smalltext">用户 ID：${esc(conversation.buyer_uid)} · ${conversation.goods_id ? "商品 " + esc(conversation.goods_id) : "尚未识别具体商品"} · ${conversation.mode === "human" ? "人工接待中" : "AI 辅助接待"} · ${local.total} 条本地记录</p></div><div class="flex">${conversation.mode === "human" && owned ? `<button class="small" data-action="resume" data-id="${id}">交还 AI</button>` : `<button class="primary small" data-action="takeover" data-id="${id}">${conversation.assignee && !owned ? "由其他客服接待" : "接管会话"}</button>`}</div></div>
+    `<div class="thread-head flex between"><div><h3>${esc(buyerLabel(conversation))}</h3><p class="muted smalltext">用户 ID：${esc(conversation.buyer_uid)} · ${conversation.goods_id ? "商品 " + esc(conversation.goods_id) : "尚未识别具体商品"} · ${conversation.mode === "human" ? "人工接待中" : "AI 辅助接待"} · ${local.total} 条本地记录</p></div><div class="flex"><button class="small" data-action="buyer-orders">查看订单</button>${conversation.mode === "human" && owned ? `<button class="small" data-action="resume" data-id="${id}">交还 AI</button>` : `<button class="primary small" data-action="takeover" data-id="${id}">${conversation.assignee && !owned ? "由其他客服接待" : "接管会话"}</button>`}</div></div>
     ${conversationProduct(local.messages, conversation.goods_id)}
     <div class="chat-messages" id="thread-messages">${local.hasMore ? '<div class="history-load-earlier"><button class="small" data-action="older-local">加载更早记录</button></div>' : '<div class="history-boundary">以上为本地保存的最早记录</div>'}${local.messages.map((message) => timelineMessage(message, buyerLabel(conversation))).join("")}</div>
     <form id="reply-form" class="chat-compose"><textarea id="reply-content" aria-label="客服回复" placeholder="${owned ? "输入回复，或使用 AI 草稿后编辑" : "请先接管会话，再审核并发送回复"}" maxlength="3000" ${owned ? "" : "disabled"}>${esc(saved)}</textarea><div class="compose-footer"><span>${owned ? "发送后以平台确认结果为准。" : "接管后会暂停该会话的 AI 自动回复。"}</span><button type="submit" class="primary" ${owned ? "" : "disabled"}>发送回复${icon("arrow")}</button></div></form>`;
@@ -919,7 +980,7 @@ function drawHistoryThread() {
   if (!item || !transcript || state.inboxSource !== "history") return;
   $("#thread").removeAttribute("data-id");
   $("#thread").innerHTML =
-    `<div class="thread-head flex between"><div><h3>${esc(buyerLabel(item))}</h3><p class="muted smalltext">用户 ID：${esc(item.buyer_uid)} · ${transcript.hasMore ? "已加载" : "共"} ${transcript.messages.length} 条历史消息${transcript.hasMore ? " · 还有更早记录" : ""}</p></div><div class="flex"><span class="badge blue">仅浏览</span><button class="small" data-action="history-takeover">接管并回复</button></div></div>
+    `<div class="thread-head flex between"><div><h3>${esc(buyerLabel(item))}</h3><p class="muted smalltext">用户 ID：${esc(item.buyer_uid)} · ${transcript.hasMore ? "已加载" : "共"} ${transcript.messages.length} 条历史消息${transcript.hasMore ? " · 还有更早记录" : ""}</p></div><div class="flex"><button class="small" data-action="buyer-orders">查看订单</button><span class="badge blue">仅浏览</span><button class="small" data-action="history-takeover">接管并回复</button></div></div>
     ${conversationProduct(transcript.messages)}
     <div class="chat-messages" id="thread-messages">${transcript.hasMore ? '<div class="history-load-earlier"><button class="small" data-action="older-history">加载更早消息</button></div>' : '<div class="history-boundary">已到该会话最早消息</div>'}${transcript.messages.map((message) => timelineMessage({ ...message, state: "historical" }, buyerLabel(item))).join("") || empty("暂无聊天记录", "平台未返回这个会话的消息。")}</div>
     <div class="history-readonly">当前只浏览历史，不会调用 AI、发送消息或修改会话的接待状态。</div>`;
@@ -991,6 +1052,23 @@ document.addEventListener("click", async (event) => {
     action = button.dataset.action;
   await busy(button, async () => {
     switch (action) {
+      case "buyer-orders": await showBuyerOrders(); break;
+      case "learning-preview": await openLearningPreview(id); break;
+      case "learning-start":
+        await post(`/api/shops/${state.shopId}/products/${encodeURIComponent(id)}/learning`);
+        closeModal(); await refreshProductCatalog(); toast("正在关联订单并整理商品咨询，完成后请审核。"); break;
+      case "learning-evidence": await showLearningEvidence(button.dataset.job,Number(button.dataset.pageNumber)||1); break;
+      case "learning-cancel": await post(`/api/shops/${state.shopId}/learning/${button.dataset.job}/cancel`); await refreshProductCatalog(); break;
+      case "learning-resume": await post(`/api/shops/${state.shopId}/learning/${button.dataset.job}/resume`); await refreshProductCatalog(); break;
+      case "sync-products": openProductSync(); break;
+      case "confirm-product-sync":
+        await post(`/api/shops/${state.shopId}/products/sync`);
+        closeModal(); await refreshProductCatalog(); toast("正在同步商品并建立知识。"); break;
+      case "view-product": await viewProduct(id); break;
+      case "product-images": openProductImages(id); break;
+      case "confirm-product-images":
+        await post(`/api/shops/${state.shopId}/products/${encodeURIComponent(id)}/images`);
+        closeModal(); await refreshProductCatalog(); toast("详情图识别已开始，完成后请审核入库。"); break;
       case "export-shop":
         openShopExport(id); break;
       case "delete-shop":
@@ -1186,11 +1264,9 @@ setInterval(async () => {
   if (!state.user || document.hidden || state.modal) return;
   try {
     if (state.page === "inbox") await refreshInbox();
-    else if (
-      state.page === "knowledge" &&
-      state.documents.some((item) => item.state === "parsing")
-    ) {
-      state.documents = await api("/api/documents?shop_id=" + state.shopId);
+    else if (state.page === "knowledge") {
+      await refreshProductCatalog();
+      state.documents = await api("/api/documents?shop_id="+state.shopId);
       drawDocuments();
     } else if (state.page === "shops") {
       const previous = JSON.stringify(state.shops);

@@ -19,3 +19,6 @@
 
 # Independent application repository
 /merchant-desk/
+
+# Optional distillation skill reference, managed independently.
+/nuwa-skill/

@@ -64,6 +64,44 @@ CREATE TABLE IF NOT EXISTS pdd_sync (
  seq_type INTEGER NOT NULL, seq_id INTEGER NOT NULL, updated_at REAL NOT NULL,
  PRIMARY KEY(shop_id,seq_type)
 );
+CREATE TABLE IF NOT EXISTS products (
+ shop_id INTEGER NOT NULL REFERENCES shops(id), goods_id TEXT NOT NULL,
+ name TEXT NOT NULL, thumb_url TEXT NOT NULL DEFAULT '', goods_url TEXT NOT NULL DEFAULT '',
+ payload TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending', error TEXT NOT NULL DEFAULT '',
+ document_id TEXT REFERENCES documents(id) ON DELETE SET NULL, generated_hash TEXT NOT NULL DEFAULT '',
+ image_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+ image_state TEXT NOT NULL DEFAULT 'idle', image_error TEXT NOT NULL DEFAULT '',
+ available INTEGER NOT NULL DEFAULT 1, seen_run TEXT NOT NULL, updated_at REAL NOT NULL,
+ PRIMARY KEY(shop_id,goods_id)
+);
+CREATE TABLE IF NOT EXISTS product_sync (
+ shop_id INTEGER PRIMARY KEY REFERENCES shops(id), run_id TEXT NOT NULL, status TEXT NOT NULL,
+ total INTEGER NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+ error TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS product_image_text (
+ shop_id INTEGER NOT NULL REFERENCES shops(id), goods_id TEXT NOT NULL,
+ url TEXT NOT NULL, content TEXT NOT NULL, updated_at REAL NOT NULL,
+ PRIMARY KEY(shop_id,goods_id,url)
+);
+CREATE TABLE IF NOT EXISTS learning_jobs (
+ id TEXT PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), goods_id TEXT NOT NULL,
+ source_export_id TEXT NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id),
+ status TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'orders', total INTEGER NOT NULL DEFAULT 0,
+ completed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+ model_batches INTEGER NOT NULL DEFAULT 0, document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+ error TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_cases (
+ job_id TEXT NOT NULL REFERENCES learning_jobs(id), case_id TEXT NOT NULL, buyer_uid TEXT NOT NULL,
+ payload TEXT NOT NULL, analysis TEXT NOT NULL DEFAULT '{}',
+ state TEXT NOT NULL DEFAULT 'pending', error TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(job_id,case_id)
+);
+CREATE TABLE IF NOT EXISTS learning_batches (
+ job_id TEXT NOT NULL REFERENCES learning_jobs(id), batch_no INTEGER NOT NULL,
+ result TEXT NOT NULL, PRIMARY KEY(job_id,batch_no)
+);
 CREATE TABLE IF NOT EXISTS exports (
  id TEXT PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), scope TEXT NOT NULL,
  status TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'discover', page INTEGER NOT NULL DEFAULT 1,

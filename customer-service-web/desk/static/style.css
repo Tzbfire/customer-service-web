@@ -1346,3 +1346,20 @@ td:first-child {
 .export-download { color: #426ad4; text-decoration: underline; display: inline-block; margin-top: 7px; }
 .deleted-shop { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .deleted-shops { margin-bottom: 18px; }
+
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,390px),1fr)); gap: 15px; }
+.catalog-item { display: flex; gap: 14px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; min-width: 0; }
+.catalog-thumb { width: 78px; height: 78px; object-fit: cover; border-radius: 9px; flex-shrink: 0; }
+.catalog-info { min-width: 0; flex: 1; font-size: 12px; line-height: 1.7; }
+.catalog-info > strong { display: block; margin-bottom: 6px; overflow-wrap: anywhere; }
+.catalog-actions { flex-wrap: wrap; margin-top: 8px; gap: 7px; }
+.product-sync-progress { margin-bottom: 14px; }
+.product-gallery { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 12px; margin: 14px 0; }
+.product-gallery .message-image { width: 100%; }
+
+.learning-controls { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.learning-progress { margin-top: 8px; }
+.learning-case { margin: 18px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; line-height: 1.8; }
+.learning-case p, .learning-source p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.learning-case summary { cursor: pointer; color: #5679c6; padding: 10px 0; }
+.learning-source { padding: 10px 0; border-bottom: 1px solid #edf1f7; }

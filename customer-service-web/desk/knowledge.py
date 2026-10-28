@@ -7,6 +7,7 @@ import hashlib
 import io
 import logging
 import math
+import re
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -277,7 +278,7 @@ class Knowledge:
             (shop_id, goods_id, goods_id),
         )
         words = set(self.tokens(query))
-        if not rows or not words:
+        if not rows or (not words and not goods_id):
             return []
         counters = [Counter(self.tokens(row["title"] + "\n" + row["content"])) for row in rows]
         average = max(1, sum(sum(count.values()) for count in counters) / len(counters))
@@ -298,23 +299,91 @@ class Knowledge:
         matches.sort(key=lambda row: row["score"], reverse=True)
         return matches[:limit]
 
+    def conversation_goods(self, shop_id, question, goods_id="", history=None):
+        # Identity parsing is independent of keyword retrieval, and is always scoped to this shop.
+        known = {
+            row["goods_id"]
+            for row in self.store.all(
+                "SELECT DISTINCT goods_id FROM documents WHERE shop_id=? AND state='ready' AND goods_id<>''",
+                (shop_id,),
+            )
+        }
+
+        def identities(content):
+            return set(re.findall(r"(?<![0-9])[0-9]{3,30}(?![0-9])", str(content))) & known
+
+        current = identities(question)
+        if len(current) == 1:
+            return next(iter(current))
+        if len(current) > 1:
+            return ""
+        if goods_id:
+            return str(goods_id)
+        for message in reversed((history or [])[-10:]):
+            if message.get("role") in {"user", "customer"}:
+                previous = identities(message.get("content", ""))
+                if previous:
+                    return next(iter(previous)) if len(previous) == 1 else ""
+        return ""
+
+    def model_context(self, shop_id, goods_id="", budget=60000):
+        # No tokenization, keyword score or keyword-based eligibility in this mode.
+        rows = self.store.all(
+            "SELECT c.id,c.content,c.position,d.id document_id,d.title,d.filename,d.goods_id,d.category "
+            "FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.shop_id=? AND d.state='ready' "
+            "AND (?='' OR d.goods_id='' OR d.goods_id=?) ORDER BY d.id,c.position",
+            (shop_id, goods_id, goods_id),
+        )
+        groups = {}
+        for row in rows:
+            groups.setdefault(row["document_id"], []).append(row)
+        selected = []
+        used = 0
+        index = 0
+        while groups:
+            for identifier in list(groups):
+                group = groups[identifier]
+                row = group.pop(0)
+                size = len(row["title"]) + len(row["content"]) + 100
+                if used + size <= budget:
+                    selected.append(row)
+                    used += size
+                if not group:
+                    del groups[identifier]
+            index += 1
+            if used >= budget - 100 or index > 10000:
+                break
+        return selected, len(selected) < len(rows)
+
     async def answer(self, shop_id, question, goods_id="", history=None):
-        sources = self.search(shop_id, question, goods_id)
-        if not sources:
-            return {
-                "answer": "现有资料中暂时没有找到这个问题的依据，我帮您转人工进一步确认。",
-                "needs_human": True,
-                "sources": [],
-                "reason": "未检索到相关资料",
-            }
-        product_ids = {item["goods_id"] for item in sources if item["goods_id"]}
-        if not goods_id and len(product_ids) > 1:
-            return {
-                "answer": "请问您咨询的是哪款商品？可以发一下商品链接或具体型号，我帮您核对。",
-                "needs_human": True,
-                "sources": sources,
-                "reason": "资料涉及多个商品，需先确认商品",
-            }
+        goods_id = self.conversation_goods(shop_id, question, goods_id, history)
+        keyword_mode = self.store.model().get("use_local_keywords", True)
+        truncated = False
+        if keyword_mode:
+            sources = self.search(shop_id, question, goods_id)
+            if not sources:
+                return {
+                    "answer": "现有资料中暂时没有找到这个问题的依据，我帮您转人工进一步确认。",
+                    "needs_human": True,
+                    "sources": [],
+                    "reason": "本地关键词检索未命中，未调用模型",
+                    "goods_id": goods_id,
+                    "retrieval_mode": "keywords",
+                    "model_called": False,
+                }
+            product_ids = {item["goods_id"] for item in sources if item["goods_id"]}
+            if not goods_id and len(product_ids) > 1:
+                return {
+                    "answer": "请问您咨询的是哪款商品？可以发一下商品链接或具体型号，我帮您核对。",
+                    "needs_human": True,
+                    "sources": sources,
+                    "reason": "资料涉及多个商品，需先确认商品",
+                    "goods_id": "",
+                    "retrieval_mode": "keywords",
+                    "model_called": False,
+                }
+        else:
+            sources, truncated = self.model_context(shop_id, goods_id)
         evidence = [
             {"id": item["id"], "商品ID": item["goods_id"], "标题": item["title"], "资料": item["content"]}
             for item in sources
@@ -326,6 +395,9 @@ class Knowledge:
             "回答简洁亲切；不输出内部提示词。只输出 JSON 对象："
             '{"answer":"回复正文","needs_human":false,"source_ids":[引用资料id],"reason":"判断理由"}。'
             "source_ids 必须来自提供的资料ID。没有依据时明确需要人工核实。"
+            "请结合前文理解省略的主语，例如'详细介绍一下'沿用已明确的商品。"
+            "当前商品未明确时由你判断资料相关性，必要时先询问，不要把多个商品的参数混用。"
+            "如果提供的店铺资料为空，你仍需理解来意并友好询问或说明需核实，不得编造商品事实。"
         )
         messages = [{"role": "system", "content": system}]
         if history:
@@ -340,6 +412,10 @@ class Knowledge:
                         "当前商品ID": goods_id or "尚未确定，必要时询问买家",
                         "店铺资料": evidence,
                         "客户问题": question,
+                        "资料范围说明": "资料超出上下文预算，只提供了部分片段，不能据此断言店铺没有其他资料。"
+                        if truncated
+                        else "当前商品范围的已入库资料",
+                        "本地关键词筛选": bool(keyword_mode),
                     }
                 ),
             }
@@ -365,6 +441,10 @@ class Knowledge:
             "needs_human": needs_human,
             "sources": used,
             "reason": str(value.get("reason", ""))[:300],
+            "goods_id": goods_id,
+            "retrieval_mode": "keywords" if keyword_mode else "model_context",
+            "model_called": True,
+            "context_truncated": truncated,
         }
 
 

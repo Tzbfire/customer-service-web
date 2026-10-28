@@ -21,6 +21,9 @@ from pydantic import BaseModel, Field
 from .channels import ChannelError, Channels
 from .history import HistoryService, HistoryConflict
 from .exports import Exports, ExportConflict
+from .products import Products
+from .learning import Learning, purchase_facts
+from .orders import Orders
 from .message_content import message_preview
 from .pdd_protocol import ProtocolError
 from .knowledge import ALLOWED, MAX_FILE, MAX_TEXT, Knowledge, file_hash
@@ -63,6 +66,7 @@ class ModelSettings(BaseModel):
     vision_enabled: bool = False
     allow_private: bool = False
     clear_api_key: bool = False
+    use_local_keywords: bool = True
 
 
 class DocumentInput(BaseModel):
@@ -103,6 +107,9 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     channels = Channels(store, knowledge, channel_transport)
     history = HistoryService(store, channels)
     exports = Exports(store, history)
+    products = Products(store, channels, knowledge)
+    learning = Learning(store, channels, model, products)
+    orders = Orders(store, channels)
     pending = set()
     attempts = {}
 
@@ -115,6 +122,8 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await learning.shutdown()
+        await products.shutdown()
         await exports.shutdown()
         await channels.shutdown()
         for task in list(pending):
@@ -126,6 +135,8 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     app.state.store, app.state.knowledge, app.state.channels = store, knowledge, channels
     app.state.pending = pending
     app.state.exports = exports
+    app.state.products = products
+    app.state.learning = learning
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
@@ -343,6 +354,10 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
         shop = shop_exists(shop_id)
         if value.confirm_name != shop["name"]:
             raise HTTPException(400, "店铺名称不匹配，请完整输入店铺名称。")
+        if learning.active(shop_id):
+            raise HTTPException(409, "店铺正在整理聊天订单知识，请先暂停任务或等待完成。")
+        if products.active(shop_id):
+            raise HTTPException(409, "店铺正在同步商品或识别详情图，请完成后再删除。")
         job = exports.latest(shop_id)
         if job and job["status"] == "running":
             raise HTTPException(409, "店铺正在导出，请先等待完成或暂停导出。")
@@ -498,12 +513,15 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     @app.get("/api/model")
     async def get_model(user=Depends(administrator)):
         settings = store.model()
+        settings.setdefault("use_local_keywords", True)
         has_key = bool(settings.pop("api_key", ""))
         return {**settings, "has_key": has_key}
 
     @app.post("/api/model")
     async def set_model(value: ModelSettings, user=Depends(administrator)):
         values = value.model_dump()
+        if "use_local_keywords" not in value.model_fields_set:
+            values["use_local_keywords"] = store.model().get("use_local_keywords", True)
         try:
             values["base_url"] = await asyncio.to_thread(
                 validate_endpoint, value.base_url, value.allow_private
@@ -541,6 +559,116 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
             "waiting": conversations["waiting"] or 0,
             "model_configured": configured,
         }
+
+    @app.get("/api/products")
+    async def list_products(shop_id: int, user=Depends(current_user)):
+        shop_exists(shop_id)
+        items = store.all(
+            "SELECT p.*,d.state knowledge_state,i.state image_knowledge_state FROM products p LEFT JOIN documents d ON d.id=p.document_id LEFT JOIN documents i ON i.id=p.image_document_id WHERE p.shop_id=? ORDER BY p.available DESC,p.updated_at DESC,p.goods_id",
+            (shop_id,),
+        )
+        for item in items:
+            payload = json.loads(item.pop("payload"))
+            item["sku_count"] = sum(sku["on_sale"] for sku in payload.get("skus", []))
+            item["image_count"] = len(payload.get("detail_images", []))
+            item["price_min"] = payload.get("price_min", "")
+            item["price_max"] = payload.get("price_max", "")
+            item["learning"] = learning.latest(shop_id, item["goods_id"])
+        return {"items": items, "sync": store.one("SELECT * FROM product_sync WHERE shop_id=?", (shop_id,))}
+
+    @app.post("/api/shops/{shop_id}/products/sync")
+    async def sync_products(shop_id: int, user=Depends(administrator)):
+        shop_exists(shop_id)
+        products.start(shop_id, user["id"])
+        store.audit(user["id"], "products.sync", str(shop_id))
+        return {"ok": True}
+
+    @app.get("/api/shops/{shop_id}/products/{goods_id}")
+    async def product_detail(shop_id: int, goods_id: str, user=Depends(current_user)):
+        shop_exists(shop_id)
+        item = store.one("SELECT * FROM products WHERE shop_id=? AND goods_id=?", (shop_id, goods_id))
+        if not item:
+            raise HTTPException(404, "本地商品不存在，请先同步。")
+        item["payload"] = json.loads(item["payload"])
+        return item
+
+    @app.get("/api/shops/{shop_id}/buyers/{buyer_uid}/orders")
+    async def buyer_orders(shop_id: int, buyer_uid: str, user=Depends(current_user)):
+        shop_exists(shop_id)
+        if not buyer_uid or len(buyer_uid) > 100:
+            raise HTTPException(422, "买家 ID 格式不正确。")
+        return await orders.buyer(shop_id, buyer_uid)
+
+    @app.get("/api/shops/{shop_id}/products/{goods_id}/learning-preview")
+    async def preview_learning(shop_id: int, goods_id: str, user=Depends(administrator)):
+        shop_exists(shop_id)
+        snapshot, cases = learning.prepare(shop_id, goods_id)
+        return {
+            "cases": len(cases),
+            "snapshot_at": snapshot["created_at"],
+            "estimated_batches": (len(cases) + 3) // 4,
+            "truncated_cases": sum(payload["chat_truncated"] for uid, payload in cases),
+        }
+
+    @app.post("/api/shops/{shop_id}/products/{goods_id}/learning")
+    async def start_learning(shop_id: int, goods_id: str, user=Depends(administrator)):
+        shop_exists(shop_id)
+        job = learning.start(shop_id, goods_id, user["id"])
+        store.audit(user["id"], "learning.start", job["id"])
+        return job
+
+    def learning_exists(shop_id, job_id):
+        shop_exists(shop_id)
+        job = store.one("SELECT * FROM learning_jobs WHERE id=? AND shop_id=?", (job_id, shop_id))
+        if not job:
+            raise HTTPException(404, "学习任务不存在。")
+        return job
+
+    @app.get("/api/shops/{shop_id}/learning/{job_id}")
+    async def learning_detail(
+        shop_id: int, job_id: str, page: int = Query(1, ge=1), user=Depends(administrator)
+    ):
+        job = learning_exists(shop_id, job_id)
+        rows = store.all(
+            "SELECT * FROM learning_cases WHERE job_id=? ORDER BY case_id LIMIT 10 OFFSET ?",
+            (job_id, (page - 1) * 10),
+        )
+        cases = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            analysis = json.loads(row["analysis"])
+            cases.append(
+                {
+                    "case_id": row["case_id"],
+                    "buyer_uid": row["buyer_uid"],
+                    "messages": payload["messages"],
+                    "analysis": analysis,
+                    "purchases": purchase_facts(payload, job["goods_id"], analysis),
+                    "state": row["state"],
+                    "error": row["error"],
+                    "chat_truncated": payload["chat_truncated"],
+                }
+            )
+        return {"job": job, "cases": cases, "page": page, "has_more": page * 10 < job["total"]}
+
+    @app.post("/api/shops/{shop_id}/learning/{job_id}/resume")
+    async def resume_learning(shop_id: int, job_id: str, user=Depends(administrator)):
+        job = learning_exists(shop_id, job_id)
+        learning.resume(job)
+        return {"ok": True}
+
+    @app.post("/api/shops/{shop_id}/learning/{job_id}/cancel")
+    async def cancel_learning(shop_id: int, job_id: str, user=Depends(administrator)):
+        learning_exists(shop_id, job_id)
+        await learning.cancel(job_id)
+        return {"ok": True}
+
+    @app.post("/api/shops/{shop_id}/products/{goods_id}/images")
+    async def product_images(shop_id: int, goods_id: str, user=Depends(administrator)):
+        shop_exists(shop_id)
+        products.start_images(shop_id, goods_id, user["id"])
+        store.audit(user["id"], "products.images", f"{shop_id}:{goods_id}")
+        return {"ok": True}
 
     @app.get("/api/documents")
     async def documents(shop_id: int, user=Depends(current_user)):

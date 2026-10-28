@@ -11,7 +11,56 @@ import httpx
 
 
 class ModelError(Exception):
-    pass
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def completion_text(response):
+    if response.status_code != 200:
+        transient = response.status_code in {408, 429, 500, 502, 503, 504}
+        raise ModelError(
+            f"模型接口返回 HTTP {response.status_code}，请核对模型服务状态和配置。", retryable=transient
+        )
+    try:
+        body = response.json()
+    except ValueError:
+        kind = "流式事件" if response.content.lstrip().startswith(b"data:") else "非 JSON 内容"
+        raise ModelError(f"模型接口返回了{kind}（HTTP 200），无法解析 JSON 正文。", retryable=True) from None
+    if not isinstance(body, dict):
+        raise ModelError("模型接口 JSON 格式错误：响应不是对象。")
+    if body.get("error"):
+        error = body["error"] if isinstance(body["error"], dict) else {}
+        code = str(error.get("code") or error.get("type") or "unknown")
+        code = code if re.fullmatch(r"[a-zA-Z0-9_.-]{1,60}", code) else "unknown"
+        raise ModelError(
+            f"模型服务返回错误（{code}），未提供识别结果。",
+            retryable=code in {"server_error", "rate_limit_exceeded", "overloaded_error", "timeout"},
+        )
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ModelError("模型接口 JSON 缺少 choices，未取得模型正文。")
+    choice = choices[0]
+    if choice.get("finish_reason") == "length":
+        raise ModelError("模型输出被截断，请缩短资料或使用输出容量更大的模型。")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise ModelError("模型接口响应缺少 message 正文。")
+    if message.get("refusal"):
+        raise ModelError("模型拒绝处理这张图片或本次请求，请核对输入内容。")
+    content = message.get("content")
+    if isinstance(content, list):
+        # Accept visible text blocks only; never use reasoning traces as product facts.
+        content = "\n".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") in {"text", "output_text"}
+            and isinstance(block.get("text"), str)
+        )
+    if not isinstance(content, str) or not content.strip():
+        raise ModelError("模型没有返回可读正文，请核对模型输出和输出额度。")
+    return content.strip()
 
 
 def validate_endpoint(base: str, allow_private=False):
@@ -58,37 +107,39 @@ class ModelClient:
         headers = {"Content-Type": "application/json"}
         if settings.get("api_key"):
             headers["Authorization"] = "Bearer " + settings["api_key"]
-        try:
-            async with (
-                self.gate,
-                httpx.AsyncClient(
-                    timeout=90, follow_redirects=False, transport=self.transport, trust_env=False
-                ) as client,
-            ):
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "temperature": 0.1,
-                        "max_tokens": max_tokens,
-                    },
-                )
-                if response.status_code != 200:
-                    raise ModelError(f"模型接口返回 HTTP {response.status_code}，请核对配置和模型能力。")
-                body = response.json()
-                choice = body["choices"][0]
-                if choice.get("finish_reason") == "length":
-                    raise ModelError("模型输出被截断，请缩短资料或使用输出容量更大的模型。")
-                content = choice["message"]["content"]
-                if not isinstance(content, str) or not content.strip():
-                    raise ModelError("模型没有返回有效的文字内容。")
-                return content.strip()
-        except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError) as exc:
-            if isinstance(exc, httpx.TimeoutException):
-                raise ModelError("模型响应超时，请稍后重试。") from None
-            raise ModelError("无法读取模型响应，请检查网络和 Chat Completions 接口兼容性。") from None
+        attempts = 3 if vision else 1
+        async with (
+            self.gate,
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(180 if vision else 90, connect=20, write=60, pool=20),
+                follow_redirects=False,
+                transport=self.transport,
+                trust_env=False,
+            ) as client,
+        ):
+            for attempt in range(attempts):
+                try:
+                    response = await client.post(
+                        url,
+                        headers={**headers, "Accept": "application/json"},
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "temperature": 0.1,
+                            "max_tokens": max_tokens,
+                            "stream": False,
+                        },
+                    )
+                    return completion_text(response)
+                except httpx.TimeoutException:
+                    error = ModelError("模型服务响应超时，请稍后重试。", retryable=True)
+                except httpx.HTTPError:
+                    error = ModelError("模型服务连接中断，请检查服务状态后重试。", retryable=True)
+                except ModelError as exc:
+                    error = exc
+                if not error.retryable or attempt + 1 == attempts:
+                    raise error from None
+                await asyncio.sleep(0.4 * (attempt + 1))
 
     async def transcribe(self, image_b64, mime="image/png"):
         return await self.complete(
