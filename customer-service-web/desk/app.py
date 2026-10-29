@@ -56,7 +56,7 @@ class DeleteShopInput(BaseModel):
 
 
 class ShopMode(BaseModel):
-    mode: Literal["manual", "review", "auto"]
+    mode: Literal["manual", "review", "auto", "ai_takeover"]
 
 
 class ModelSettings(BaseModel):
@@ -462,6 +462,10 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     @app.post("/api/shops/{shop_id}/mode")
     async def shop_mode(shop_id: int, value: ShopMode, user=Depends(administrator)):
         shop_exists(shop_id)
+        if value.mode == "ai_takeover":
+            settings = store.model()
+            if not settings.get("base_url") or not settings.get("model"):
+                raise HTTPException(409, "请先配置大模型，再启用 AI 接管。")
         store.execute("UPDATE shops SET mode=? WHERE id=?", (value.mode, shop_id))
         store.audit(user["id"], "shop.mode", f"{shop_id}:{value.mode}")
         return {"ok": True}

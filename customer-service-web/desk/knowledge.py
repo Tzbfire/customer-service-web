@@ -355,9 +355,9 @@ class Knowledge:
                 break
         return selected, len(selected) < len(rows)
 
-    async def answer(self, shop_id, question, goods_id="", history=None):
+    async def answer(self, shop_id, question, goods_id="", history=None, *, ai_takeover=False):
         goods_id = self.conversation_goods(shop_id, question, goods_id, history)
-        keyword_mode = self.store.model().get("use_local_keywords", True)
+        keyword_mode = not ai_takeover and self.store.model().get("use_local_keywords", True)
         truncated = False
         if keyword_mode:
             sources = self.search(shop_id, question, goods_id)
@@ -399,6 +399,16 @@ class Knowledge:
             "当前商品未明确时由你判断资料相关性，必要时先询问，不要把多个商品的参数混用。"
             "如果提供的店铺资料为空，你仍需理解来意并友好询问或说明需核实，不得编造商品事实。"
         )
+        if ai_takeover:
+            system += (
+                "当前是 AI 接管接待模式，你需要持续接待新文字咨询。"
+                "回复 JSON 另加 reply_kind，只能为 greeting、clarification、answer、handoff。"
+                "greeting 仅问候，clarification 仅向买家澄清商品、颜色、面积等缺失条件，二者不陈述任何未经证实的商品事实，"
+                "可以 source_ids=[] 且 needs_human=false。"
+                "answer 涉及商品事实或政策，必须引用当前已入库资料。没有依据不能给参数、价格、耗量、物流或赔付承诺。"
+                "需要人工核实或买家明确要求人工时，用 handoff 且 needs_human=true。"
+                "不要把无依据的商品回答标为 greeting 或 clarification。"
+            )
         messages = [{"role": "system", "content": system}]
         if history:
             messages.append(
@@ -427,7 +437,20 @@ class Knowledge:
         if not isinstance(requested, list):
             requested = []
         used = [item for item in sources if item["id"] in requested]
-        needs_human = value.get("needs_human") is not False or not used
+        reply_kind = value.get("reply_kind", "answer")
+        if not isinstance(reply_kind, str):
+            reply_kind = "unknown"
+        conversational = ai_takeover and reply_kind in {"greeting", "clarification"}
+        allowed_ids = {item["id"] for item in sources}
+        invalid_citations = any(
+            not isinstance(identifier, int) or isinstance(identifier, bool) or identifier not in allowed_ids
+            for identifier in requested
+        )
+        needs_human = (
+            value.get("needs_human") is not False or (not used and not conversational) or invalid_citations
+        )
+        if ai_takeover and reply_kind not in {"greeting", "clarification", "answer"}:
+            needs_human = True
         if any(
             word in question
             for word in ("转人工", "找人工", "人工客服", "申请退款", "我要退款", "给我退款", "赔付", "投诉")
@@ -445,6 +468,8 @@ class Knowledge:
             "retrieval_mode": "keywords" if keyword_mode else "model_context",
             "model_called": True,
             "context_truncated": truncated,
+            "reply_kind": reply_kind,
+            "auto_reply_eligible": bool(ai_takeover and not needs_human and (used or conversational)),
         }
 
 

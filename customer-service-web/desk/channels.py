@@ -411,7 +411,14 @@ class Channels:
             )[::-1]
         # Generation must never hold the reply lock: staff can take over and reply immediately.
         try:
-            result = await self.knowledge.answer(shop_id, item["content"], conversation["goods_id"], history)
+            if shop["mode"] == "ai_takeover":
+                result = await self.knowledge.answer(
+                    shop_id, item["content"], conversation["goods_id"], history, ai_takeover=True
+                )
+            else:
+                result = await self.knowledge.answer(
+                    shop_id, item["content"], conversation["goods_id"], history
+                )
         except ModelError as exc:
             self.store.execute(
                 "INSERT INTO messages(conversation_id,role,content,state,created_at) "
@@ -435,7 +442,13 @@ class Channels:
             if read_presentation(incoming["presentation"]).get("kind") == "withdrawn":
                 return
             shop = self.store.one("SELECT * FROM shops WHERE id=?", (shop_id,))
-            can_send = shop["mode"] == "auto" and not result["needs_human"] and bool(result["sources"])
+            if not shop or shop["deleted_at"] or shop["mode"] == "manual":
+                self.store.execute("UPDATE conversations SET needs_human=1 WHERE id=?", (conversation["id"],))
+                return
+            can_send = not result["needs_human"] and (
+                (shop["mode"] == "auto" and bool(result["sources"]))
+                or (shop["mode"] == "ai_takeover" and result.get("auto_reply_eligible") is True)
+            )
             if can_send:
                 await self.send(
                     conversation["id"],
