@@ -297,15 +297,36 @@ class Channels:
                 ).rowcount
                 if changed:
                     return
-            if (
-                item["platform_id"] is not None
-                and db.execute(
-                    "SELECT m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+            existing = (
+                db.execute(
+                    "SELECT m.id,m.state,m.created_at,m.presentation FROM messages m "
+                    "JOIN conversations c ON c.id=m.conversation_id "
                     "WHERE c.shop_id=? AND c.buyer_uid=? AND m.platform_id=?",
                     (shop_id, item["uid"], item["platform_id"]),
                 ).fetchone()
-            ):
-                return
+                if item["platform_id"] is not None
+                else None
+            )
+            if existing:
+                # History refresh may win the race with a live push; only that fresh live push
+                # can claim the message for normal processing, once. Historical recovery cannot.
+                fresh = abs(time() - existing["created_at"]) < 120
+                can_claim = (
+                    existing["state"] == "historical"
+                    and role == "customer"
+                    and item.get("automatic")
+                    and not item.get("recovered")
+                    and fresh
+                    and read_presentation(existing["presentation"]).get("kind") != "withdrawn"
+                )
+                if (
+                    not can_claim
+                    or not db.execute(
+                        "UPDATE messages SET state='received' WHERE id=? AND state='historical'",
+                        (existing["id"],),
+                    ).rowcount
+                ):
+                    return
             db.execute(
                 "INSERT INTO conversations(shop_id,buyer_uid,buyer_name,goods_id,updated_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(shop_id,buyer_uid) DO UPDATE SET buyer_name=CASE WHEN excluded.buyer_name<>excluded.buyer_uid "
@@ -332,19 +353,22 @@ class Channels:
                     ),
                 )
             try:
-                cursor = db.execute(
-                    "INSERT INTO messages(conversation_id,role,content,platform_id,created_at,presentation) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (
-                        conversation["id"],
-                        role,
-                        item["content"],
-                        item["platform_id"],
-                        timestamp(item.get("timestamp")) or time(),
-                        json.dumps(presentation, ensure_ascii=False),
-                    ),
-                )
-                incoming_id = cursor.lastrowid
+                if existing:
+                    incoming_id = existing["id"]
+                else:
+                    cursor = db.execute(
+                        "INSERT INTO messages(conversation_id,role,content,platform_id,created_at,presentation) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (
+                            conversation["id"],
+                            role,
+                            item["content"],
+                            item["platform_id"],
+                            timestamp(item.get("timestamp")) or time(),
+                            json.dumps(presentation, ensure_ascii=False),
+                        ),
+                    )
+                    incoming_id = cursor.lastrowid
                 if role == "customer":
                     db.execute("UPDATE conversations SET needs_human=1 WHERE id=?", (conversation["id"],))
                 recalled = db.execute(
@@ -376,11 +400,14 @@ class Channels:
             if conversation["mode"] == "human" or shop["mode"] == "manual" or not item["automatic"]:
                 self.store.execute("UPDATE conversations SET needs_human=1 WHERE id=?", (conversation["id"],))
                 return
+            incoming = self.store.one("SELECT created_at FROM messages WHERE id=?", (incoming_id,))
             history = self.store.all(
-                "SELECT role,content FROM messages WHERE conversation_id=? AND id<? "
+                "SELECT role,content FROM messages WHERE conversation_id=? "
+                "AND (created_at<? OR (created_at=? AND id<?)) "
                 "AND role IN ('customer','assistant','agent') "
-                "AND COALESCE(json_extract(presentation,'$.kind'),'')<>'withdrawn' ORDER BY id DESC LIMIT 10",
-                (conversation["id"], incoming_id),
+                "AND COALESCE(json_extract(presentation,'$.kind'),'')<>'withdrawn' "
+                "ORDER BY created_at DESC,id DESC LIMIT 10",
+                (conversation["id"], incoming["created_at"], incoming["created_at"], incoming_id),
             )[::-1]
         # Generation must never hold the reply lock: staff can take over and reply immediately.
         try:
@@ -399,7 +426,7 @@ class Channels:
                 return
             latest = self.store.one(
                 "SELECT id FROM messages WHERE conversation_id=? AND role='customer' "
-                "ORDER BY id DESC LIMIT 1",
+                "ORDER BY created_at DESC,id DESC LIMIT 1",
                 (conversation["id"],),
             )
             if latest["id"] != incoming_id:

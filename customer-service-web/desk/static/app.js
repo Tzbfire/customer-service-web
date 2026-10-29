@@ -764,7 +764,8 @@ async function refreshThread() {
     !$("#thread")
   )
     return;
-  const signature = JSON.stringify(value);
+  // A successful polling timestamp alone must not rebuild the reply form and steal input focus.
+  const signature = JSON.stringify({...value, platform_history: {...value.platform_history, checked_at: 0}});
   if (state.conversationSignature === signature) return;
   state.conversationSignature = signature;
   if (state.localTranscript?.id === id) {
@@ -773,6 +774,7 @@ async function refreshThread() {
       value.messages,
     );
     state.localTranscript.total = value.total;
+    state.localTranscript.platformHistory = value.platform_history;
     if (!state.localTranscript.loadedEarlier) {
       state.localTranscript.hasMore = value.has_more;
       state.localTranscript.cursor = value.next_before_id;
@@ -785,6 +787,7 @@ async function refreshThread() {
       hasMore: value.has_more,
       cursor: value.next_before_id,
       loadedEarlier: false,
+      platformHistory: value.platform_history,
     };
   state.activeConversation = value.conversation;
   drawLocalThread();
@@ -801,6 +804,12 @@ function drawLocalThread() {
     return;
   const id = conversation.id,
     owned = conversation.assignee === state.user.id;
+  const remote = local.platformHistory || {status:"pending",complete:false,has_more:true};
+  const olderAvailable = local.hasMore || remote.has_more;
+  const boundary = local.hasMore ? "加载更早记录" : remote.has_more ? "加载更早平台记录" : "";
+  const syncNotice = remote.status === "error" || remote.status === "unavailable"
+    ? `<div class="transcript-sync-error" role="status">${esc(remote.error || "平台记录尚未同步完整")}${remote.status === "error" ? ' <button class="quiet small" data-action="sync-platform">重试同步</button>' : ""}</div>`
+    : remote.pending_gap ? '<div class="transcript-sync-status" role="status">正在补齐断线期间的消息，可继续查看已有记录。</div>' : "";
   const saved =
     Number($("#thread").dataset.id) === id
       ? $("#reply-content")?.value || ""
@@ -809,9 +818,10 @@ function drawLocalThread() {
   state.activeMessages = local.messages;
   $("#thread").dataset.id = id;
   $("#thread").innerHTML =
-    `<div class="thread-head flex between"><div><h3>${esc(buyerLabel(conversation))}</h3><p class="muted smalltext">用户 ID：${esc(conversation.buyer_uid)} · ${conversation.goods_id ? "商品 " + esc(conversation.goods_id) : "尚未识别具体商品"} · ${conversation.mode === "human" ? "人工接待中" : "AI 辅助接待"} · ${local.total} 条本地记录</p></div><div class="flex"><button class="small" data-action="buyer-orders">查看订单</button>${conversation.mode === "human" && owned ? `<button class="small" data-action="resume" data-id="${id}">交还 AI</button>` : `<button class="primary small" data-action="takeover" data-id="${id}">${conversation.assignee && !owned ? "由其他客服接待" : "接管会话"}</button>`}</div></div>
+    `<div class="thread-head flex between"><div><h3>${esc(buyerLabel(conversation))}</h3><p class="muted smalltext">用户 ID：${esc(conversation.buyer_uid)} · ${conversation.goods_id ? "商品 " + esc(conversation.goods_id) : "尚未识别具体商品"} · ${conversation.mode === "human" ? "人工接待中" : "AI 辅助接待"} · 已显示 ${local.messages.length} / 本地 ${local.total} 条${remote.complete ? " · 平台历史已加载到底" : remote.has_more ? " · 还有更早平台记录" : ""}</p></div><div class="flex"><button class="quiet small" data-action="sync-platform">同步平台记录</button><button class="small" data-action="buyer-orders">查看订单</button>${conversation.mode === "human" && owned ? `<button class="small" data-action="resume" data-id="${id}">交还 AI</button>` : `<button class="primary small" data-action="takeover" data-id="${id}">${conversation.assignee && !owned ? "由其他客服接待" : "接管会话"}</button>`}</div></div>
+    ${syncNotice}
     ${conversationProduct(local.messages, conversation.goods_id)}
-    <div class="chat-messages" id="thread-messages">${local.hasMore ? '<div class="history-load-earlier"><button class="small" data-action="older-local">加载更早记录</button></div>' : '<div class="history-boundary">以上为本地保存的最早记录</div>'}${local.messages.map((message) => timelineMessage(message, buyerLabel(conversation))).join("")}</div>
+    <div class="chat-messages" id="thread-messages">${olderAvailable ? `<div class="history-load-earlier"><button class="small" data-action="older-local">${boundary}</button></div>` : `<div class="history-boundary">${remote.complete ? "已加载至平台最早可获取记录" : "以上为本地保存的最早记录，平台完整性尚未确认"}</div>`}${local.messages.map((message) => timelineMessage(message, buyerLabel(conversation))).join("")}</div>
     <form id="reply-form" class="chat-compose"><textarea id="reply-content" aria-label="客服回复" placeholder="${owned ? "输入回复，或使用 AI 草稿后编辑" : "请先接管会话，再审核并发送回复"}" maxlength="3000" ${owned ? "" : "disabled"}>${esc(saved)}</textarea><div class="compose-footer"><span>${owned ? "发送后以平台确认结果为准。" : "接管后会暂停该会话的 AI 自动回复。"}</span><button type="submit" class="primary" ${owned ? "" : "disabled"}>发送回复${icon("arrow")}</button></div></form>`;
   finishMessageLayout(previousScroll);
   $("#reply-form").addEventListener("submit", (event) => {
@@ -829,25 +839,40 @@ function drawLocalThread() {
     });
   });
 }
+async function syncLiveTranscript() {
+  const id=state.conversationId;
+  if(!id)return;
+  const result=await post(`/api/conversations/${id}/history`,{older:false});
+  if(state.conversationId!==id || state.inboxSource==="history")return;
+  state.conversationSignature="";
+  await refreshThread();
+  if(result.status==="error")toast(result.error,true);
+}
 async function loadOlderLocal() {
-  const local = state.localTranscript,
-    id = state.conversationId;
-  if (!local?.hasMore || !local.cursor) return;
-  const box = $("#thread-messages"),
-    height = box.scrollHeight,
-    position = box.scrollTop;
-  const value = await api(
-    `/api/conversations/${id}?before_id=${local.cursor}&limit=100`,
-  );
+  const local = state.localTranscript, id = state.conversationId;
+  if (!local || !local.messages.length) return;
+  const box = $("#thread-messages"), height = box.scrollHeight, position = box.scrollTop;
+  if (!local.hasMore && local.platformHistory?.has_more) {
+    const result=await post(`/api/conversations/${id}/history`,{older:true});
+    if(state.conversationId!==id || state.inboxSource==="history")return;
+    local.platformHistory=result;
+    if(result.status==="error") {
+      drawLocalThread();
+      toast(result.error,true);
+      return;
+    }
+  } else if (!local.hasMore) return;
+  const anchor=local.messages[0].id;
+  const value = await api(`/api/conversations/${id}?before_id=${anchor}&limit=100`);
   if (state.conversationId !== id || state.inboxSource === "history") return;
   local.messages = mergeTranscript(local.messages, value.messages);
   local.hasMore = value.has_more;
   local.cursor = value.next_before_id;
   local.total = value.total;
+  local.platformHistory=value.platform_history;
   local.loadedEarlier = true;
   drawLocalThread();
-  $("#thread-messages").scrollTop =
-    $("#thread-messages").scrollHeight - height + position;
+  $("#thread-messages").scrollTop = $("#thread-messages").scrollHeight - height + position;
   $("#thread-messages").dataset.followBottom = "false";
 }
 async function loadHistoryConversations() {
@@ -1102,6 +1127,9 @@ document.addEventListener("click", async (event) => {
         break;
       case "history-takeover":
         await takeOverHistory();
+        break;
+      case "sync-platform":
+        await syncLiveTranscript();
         break;
       case "older-local":
         await loadOlderLocal();

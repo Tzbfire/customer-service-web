@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from .channels import ChannelError, Channels
 from .history import HistoryService, HistoryConflict
+from .transcript_sync import TranscriptSync
 from .exports import Exports, ExportConflict
 from .products import Products
 from .learning import Learning, purchase_facts
@@ -83,6 +84,10 @@ class Question(BaseModel):
     history: list[dict[str, str]] = Field(default_factory=list, max_length=10)
 
 
+class TranscriptInput(BaseModel):
+    older: bool = False
+
+
 class SendInput(BaseModel):
     content: str = Field(min_length=1, max_length=3000)
     request_key: str = Field(min_length=8, max_length=100)
@@ -106,6 +111,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     knowledge = Knowledge(store, model)
     channels = Channels(store, knowledge, channel_transport)
     history = HistoryService(store, channels)
+    transcripts = TranscriptSync(store, history)
     exports = Exports(store, history)
     products = Products(store, channels, knowledge)
     learning = Learning(store, channels, model, products)
@@ -137,6 +143,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     app.state.exports = exports
     app.state.products = products
     app.state.learning = learning
+    app.state.transcripts = transcripts
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
@@ -840,6 +847,11 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
         user=Depends(current_user),
     ):
         conversation = conversation_exists(conversation_id)
+        platform_history = (
+            await transcripts.refresh(conversation)
+            if before_id is None
+            else transcripts.state(conversation_id)
+        )
         conversation["buyer_name"] = await channels.profiles.resolve(
             conversation["shop_id"],
             conversation["buyer_uid"],
@@ -871,10 +883,18 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
         return {
             "conversation": conversation,
             "messages": messages,
+            "platform_history": platform_history,
             "total": total,
             "has_more": has_more,
             "next_before_id": messages[0]["id"] if has_more and messages else None,
         }
+
+    @app.post("/api/conversations/{conversation_id}/history")
+    async def sync_conversation_history(
+        conversation_id: int, value: TranscriptInput, user=Depends(current_user)
+    ):
+        conversation = conversation_exists(conversation_id)
+        return await transcripts.refresh(conversation, older=value.older, force=True)
 
     @app.post("/api/conversations/{conversation_id}/takeover")
     async def takeover(conversation_id: int, user=Depends(current_user)):

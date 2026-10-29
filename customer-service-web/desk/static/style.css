@@ -1363,3 +1363,7 @@ td:first-child {
 .learning-case p, .learning-source p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .learning-case summary { cursor: pointer; color: #5679c6; padding: 10px 0; }
 .learning-source { padding: 10px 0; border-bottom: 1px solid #edf1f7; }
+
+.transcript-sync-error, .transcript-sync-status { padding: 10px 24px; font-size: 11px; line-height: 1.7; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.transcript-sync-error { background: #fff6e9; color: #ab7433; }
+.transcript-sync-status { background: #f3f7ff; color: #6484b5; }

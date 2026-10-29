@@ -42,6 +42,10 @@ def history_system(tmp_path):
         if request.url.path.endswith("/chat/list"):
             options = command["list"]
             assert command["notUpdateUnreplyTs"] is True
+            if options["with"] == {"role": "user", "id": "buyer2"}:
+                return httpx.Response(
+                    200, json={"success": True, "result": {"messages": [], "has_more": False}}
+                )
             assert options["with"] == {"role": "user", "id": "buyer1"}
             messages = (
                 [

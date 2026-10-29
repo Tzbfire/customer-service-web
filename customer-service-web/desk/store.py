@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS messages (
  UNIQUE(conversation_id,platform_id)
 );
 CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id,id);
+CREATE TABLE IF NOT EXISTS transcript_sync (
+ conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+ checked_at REAL NOT NULL DEFAULT 0, cursor TEXT NOT NULL DEFAULT '',
+ has_more INTEGER NOT NULL DEFAULT 1, head_id TEXT NOT NULL DEFAULT '',
+ gap_cursor TEXT NOT NULL DEFAULT '', gap_target TEXT NOT NULL DEFAULT '',
+ error TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS buyer_profiles (
  shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
  buyer_uid TEXT NOT NULL, chat_type TEXT NOT NULL DEFAULT '', nickname TEXT NOT NULL DEFAULT '',

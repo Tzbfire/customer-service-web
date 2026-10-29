@@ -48,6 +48,8 @@ def system(tmp_path):
     sent = []
 
     def channel_handler(request):
+        if request.url.path == "/plateau/chat/list":
+            return httpx.Response(200,json={"success":True,"result":{"messages":[],"has_more":False}})
         if request.url.path == "/latitude/user/userInfoWithTags":
             return httpx.Response(200, json={"success": False, "errorCode": 403})
         if request.url.path.endswith("userinfo"):
