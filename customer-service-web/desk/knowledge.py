@@ -357,7 +357,8 @@ class Knowledge:
 
     async def answer(self, shop_id, question, goods_id="", history=None, *, ai_takeover=False):
         goods_id = self.conversation_goods(shop_id, question, goods_id, history)
-        keyword_mode = not ai_takeover and self.store.model().get("use_local_keywords", True)
+        settings = self.store.model()
+        keyword_mode = not ai_takeover and settings.get("use_local_keywords", True)
         truncated = False
         if keyword_mode:
             sources = self.search(shop_id, question, goods_id)
@@ -409,6 +410,9 @@ class Knowledge:
                 "需要人工核实或买家明确要求人工时，用 handoff 且 needs_human=true。"
                 "不要把无依据的商品回答标为 greeting 或 clarification。"
             )
+        business_prompt = settings.get("system_prompt", "").strip()
+        if business_prompt:
+            system = "商家设置的客服要求：\n" + business_prompt + "\n\n以下为工作台回复要求：\n" + system
         messages = [{"role": "system", "content": system}]
         if history:
             messages.append(

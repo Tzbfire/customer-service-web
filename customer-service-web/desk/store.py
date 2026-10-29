@@ -146,6 +146,16 @@ class Store:
             shop_columns = {row[1] for row in db.execute("PRAGMA table_info(shops)")}
             if "deleted_at" not in shop_columns:
                 db.execute("ALTER TABLE shops ADD COLUMN deleted_at REAL")
+            export_columns = {row[1] for row in db.execute("PRAGMA table_info(exports)")}
+            for name, declaration in (
+                ("mode", "TEXT NOT NULL DEFAULT 'full'"),
+                ("baseline_id", "TEXT"),
+                ("baseline_at", "REAL"),
+                ("new_messages", "INTEGER NOT NULL DEFAULT 0"),
+                ("updated_messages", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in export_columns:
+                    db.execute(f"ALTER TABLE exports ADD COLUMN {name} {declaration}")
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             if "presentation" not in message_columns:
                 db.execute("ALTER TABLE messages ADD COLUMN presentation TEXT NOT NULL DEFAULT '{}'")

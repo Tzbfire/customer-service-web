@@ -49,6 +49,7 @@ class ShopInput(BaseModel):
 
 class ExportInput(BaseModel):
     scope: Literal["platform", "local"] = "platform"
+    mode: Literal["full", "incremental"] = "full"
 
 
 class DeleteShopInput(BaseModel):
@@ -68,6 +69,7 @@ class ModelSettings(BaseModel):
     allow_private: bool = False
     clear_api_key: bool = False
     use_local_keywords: bool = True
+    system_prompt: str = Field(default="", max_length=12000)
 
 
 class DocumentInput(BaseModel):
@@ -339,6 +341,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
             row["protocol"] = channels.protocol_report(row["id"])
             if user["role"] == "admin":
                 row["export"] = exports.latest(row["id"])
+                row["export_baselines"] = exports.baselines(row["id"])
         return rows
 
     @app.get("/api/shops/deleted")
@@ -402,7 +405,10 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     @app.post("/api/shops/{shop_id}/exports")
     async def start_export(shop_id: int, value: ExportInput, user=Depends(administrator)):
         shop_exists(shop_id)
-        job = exports.start(shop_id, value.scope)
+        try:
+            job = exports.start(shop_id, value.scope, value.mode)
+        except ExportConflict as exc:
+            raise HTTPException(409, str(exc)) from None
         store.audit(user["id"], "shop.export", job["id"])
         return job
 
@@ -525,14 +531,17 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
     async def get_model(user=Depends(administrator)):
         settings = store.model()
         settings.setdefault("use_local_keywords", True)
+        settings.setdefault("system_prompt", "")
         has_key = bool(settings.pop("api_key", ""))
         return {**settings, "has_key": has_key}
 
     @app.post("/api/model")
     async def set_model(value: ModelSettings, user=Depends(administrator)):
         values = value.model_dump()
-        if "use_local_keywords" not in value.model_fields_set:
-            values["use_local_keywords"] = store.model().get("use_local_keywords", True)
+        previous = store.model()
+        for key, default in (("use_local_keywords", True), ("system_prompt", "")):
+            if key not in value.model_fields_set:
+                values[key] = previous.get(key, default)
         try:
             values["base_url"] = await asyncio.to_thread(
                 validate_endpoint, value.base_url, value.allow_private

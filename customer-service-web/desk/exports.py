@@ -16,6 +16,7 @@ from uuid import uuid4
 from .message_content import read_presentation
 from .export_markdown import heading, conversation_header, message_markdown
 from .pdd_protocol import ProtocolError
+from .export_incremental import select_messages
 
 
 class ExportConflict(Exception):
@@ -39,22 +40,50 @@ class Exports:
             (shop_id,),
         )
 
+    def last_success(self, shop_id, scope):
+        return self.store.one(
+            "SELECT * FROM exports WHERE shop_id=? AND scope=? AND status='done' "
+            "ORDER BY updated_at DESC,rowid DESC LIMIT 1",
+            (shop_id, scope),
+        )
+
+    def baselines(self, shop_id):
+        result = {}
+        for scope in ("platform", "local"):
+            job = self.last_success(shop_id, scope)
+            if job:
+                result[scope] = {"id": job["id"], "at": job["updated_at"]}
+        return result
+
     def update(self, identifier, **values):
         self.store.execute(
             "UPDATE exports SET " + ",".join(key + "=?" for key in values) + ",updated_at=? WHERE id=?",
             (*values.values(), time(), identifier),
         )
 
-    def start(self, shop_id, scope):
+    def start(self, shop_id, scope, mode="full"):
         latest = self.latest(shop_id)
         if latest and latest["status"] == "running":
             return latest
         if scope == "platform":
             self.history.channels.cookies(shop_id)
+        baseline = self.last_success(shop_id, scope)
+        if mode == "incremental" and baseline and not self.snapshot_path(baseline["id"]).is_file():
+            raise ExportConflict("上次成功导出的消息基准文件已丢失，请先全量导出以重建基准。")
         identifier = uuid4().hex
         self.store.execute(
-            "INSERT INTO exports(id,shop_id,scope,status,created_at,updated_at) VALUES(?,?,?,'running',?,?)",
-            (identifier, shop_id, scope, time(), time()),
+            "INSERT INTO exports(id,shop_id,scope,status,mode,baseline_id,baseline_at,created_at,updated_at) "
+            "VALUES(?,?,?,'running',?,?,?,?,?)",
+            (
+                identifier,
+                shop_id,
+                scope,
+                mode,
+                baseline["id"] if baseline else None,
+                baseline["updated_at"] if baseline else None,
+                time(),
+                time(),
+            ),
         )
         self.tasks[identifier] = asyncio.create_task(self.run(identifier))
         return self.store.one("SELECT * FROM exports WHERE id=?", (identifier,))
@@ -64,6 +93,9 @@ class Exports:
             return
         if job["status"] == "done":
             raise ExportConflict("任务已完成，可直接下载或新建导出。")
+        current = self.last_success(job["shop_id"], job["scope"])
+        if current and current["id"] != job.get("baseline_id") and current["updated_at"] > job["created_at"]:
+            raise ExportConflict("此任务之后已有成功导出，请新建增量导出，避免重复记录。")
         self.update(job["id"], status="running", error="")
         self.tasks[job["id"]] = asyncio.create_task(self.run(job["id"]))
 
@@ -71,6 +103,9 @@ class Exports:
         folder = self.root / identifier
         folder.mkdir(exist_ok=True)
         return folder
+
+    def snapshot_path(self, identifier):
+        return self.root / identifier / "transcripts.sqlite3"
 
     def connect(self, identifier):
         db = sqlite3.connect(self.workspace(identifier) / "transcripts.sqlite3")
@@ -86,6 +121,11 @@ class Exports:
               platform_id TEXT, ts REAL NOT NULL, payload TEXT NOT NULL,
               PRIMARY KEY(uid,chat_type,key));
         """)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(transcript)")}
+        if "included" not in columns:
+            db.execute("ALTER TABLE transcript ADD COLUMN included INTEGER NOT NULL DEFAULT 1")
+        if "export_change" not in columns:
+            db.execute("ALTER TABLE transcript ADD COLUMN export_change TEXT NOT NULL DEFAULT 'new'")
         return db
 
     def add_messages(self, db, uid, chat_type, messages, source):
@@ -117,9 +157,15 @@ class Exports:
     def counts(self, db, identifier):
         self.update(
             identifier,
-            conversations=db.execute("SELECT count(*) FROM contacts").fetchone()[0],
-            completed=db.execute("SELECT count(*) FROM contacts WHERE done=1").fetchone()[0],
-            messages=db.execute("SELECT count(*) FROM transcript").fetchone()[0],
+            conversations=db.execute(
+                "SELECT count(*) FROM contacts c WHERE EXISTS(SELECT 1 FROM transcript t "
+                "WHERE t.uid=c.uid AND t.chat_type=c.chat_type AND t.included=1)"
+            ).fetchone()[0],
+            completed=db.execute(
+                "SELECT count(*) FROM contacts c WHERE done=1 AND EXISTS(SELECT 1 FROM transcript t "
+                "WHERE t.uid=c.uid AND t.chat_type=c.chat_type AND t.included=1)"
+            ).fetchone()[0],
+            messages=db.execute("SELECT count(*) FROM transcript WHERE included=1").fetchone()[0],
         )
 
     async def run(self, identifier):
@@ -230,6 +276,9 @@ class Exports:
                         ),
                     )
             db.commit()
+            baseline_path = self.snapshot_path(job["baseline_id"]) if job.get("baseline_id") else None
+            new_count, changed_count = select_messages(db, job["mode"], baseline_path)
+            self.update(identifier, new_messages=new_count, updated_messages=changed_count)
             self.counts(db, identifier)
             self.update(identifier, phase="package")
             packing = asyncio.create_task(
@@ -269,13 +318,29 @@ class Exports:
 
         try:
             with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as output:
-                contacts = db.execute("SELECT * FROM contacts ORDER BY uid,chat_type").fetchall()
+                contacts = db.execute(
+                    "SELECT * FROM contacts c WHERE EXISTS(SELECT 1 FROM transcript t "
+                    "WHERE t.uid=c.uid AND t.chat_type=c.chat_type AND t.included=1) ORDER BY uid,chat_type"
+                ).fetchall()
                 manifest = {
                     "shop": shop,
                     "scope": job["scope"],
+                    "mode": job["mode"],
+                    "baseline_id": job["baseline_id"],
+                    "baseline_at": job["baseline_at"],
+                    "first_export": not bool(job["baseline_id"]),
+                    "selection": "新增消息及内容更新（含撤回）；按消息 ID 和指纹比对，不按消息时间截断。"
+                    if job["mode"] == "incremental"
+                    else "全部可获取的消息。",
                     "created_at": job["created_at"],
                     "conversations": len(contacts),
-                    "messages": db.execute("SELECT count(*) FROM transcript").fetchone()[0],
+                    "messages": db.execute("SELECT count(*) FROM transcript WHERE included=1").fetchone()[0],
+                    "new_messages": db.execute(
+                        "SELECT count(*) FROM transcript WHERE included=1 AND export_change='new'"
+                    ).fetchone()[0],
+                    "updated_messages": db.execute(
+                        "SELECT count(*) FROM transcript WHERE included=1 AND export_change='updated'"
+                    ).fetchone()[0],
                     "formats": ["csv", "json", "html", "markdown"],
                     "note": "平台导出范围为当前账号可访问且枚举接口返回的历史，不代表平台全部留存。图片和视频保留在线地址，不打包媒体原文件。",
                 }
@@ -295,7 +360,13 @@ class Exports:
                     csv_path.open("w", encoding="utf-8-sig", newline="") as file,
                     combined_markdown.open("w", encoding="utf-8") as combined,
                 ):
-                    combined.write(f"# {heading(shop['name'])} · 全部导出对话\n\n")
+                    title = "增量导出对话" if job["mode"] == "incremental" else "全部导出对话"
+                    combined.write(f"# {heading(shop['name'])} · {title}\n\n")
+                    if job["mode"] == "incremental":
+                        combined.write("本文件仅含新增或更新记录；首次导出会包含全部可获取记录。\n\n")
+                        combined.write(
+                            f"新增 {manifest['new_messages']} 条，更新 {manifest['updated_messages']} 条。\n\n"
+                        )
                     combined.write(
                         (
                             "范围：平台可获取的历史＋本地记录。"
@@ -317,6 +388,7 @@ class Exports:
                             "商品ID",
                             "媒体地址",
                             "来源",
+                            "导出变更",
                         ]
                     )
                     for number, contact in enumerate(contacts, 1):
@@ -334,11 +406,12 @@ class Exports:
                             f'<a href="../index.html">返回会话列表</a><h1>{esc(contact["name"])}</h1><p>买家 ID：{esc(contact["uid"])}</p>',
                         ]
                         rows = db.execute(
-                            "SELECT * FROM transcript WHERE uid=? AND chat_type=? ORDER BY ts,length(key),key",
+                            "SELECT * FROM transcript WHERE uid=? AND chat_type=? AND included=1 ORDER BY ts,length(key),key",
                             (contact["uid"], contact["chat_type"]),
                         )
                         for row in rows:
                             value = json.loads(row["payload"])
+                            value["export_change"] = row["export_change"]
                             p = value.get("presentation") or {}
                             body = p.get("body", value["content"])
                             if p.get("kind") == "withdrawn":
@@ -361,6 +434,7 @@ class Exports:
                                 product.get("id"),
                                 " ".join(m["url"] for m in media),
                                 value["source"],
+                                {"updated": "更新", "new": "新增", "unchanged": "已有"}[row["export_change"]],
                             ]
                             # Avoid spreadsheet formulas when opening untrusted chat content as CSV.
                             writer.writerow(
@@ -420,6 +494,8 @@ class Exports:
                 output.writestr(
                     "README.txt",
                     "打开 index.html 或 index.md 浏览；messages.md 为全部对话；conversations/*.md 为单会话 Markdown；messages.csv 可用 Excel 打开；conversations/*.json 保留结构化消息。\n"
+                    + manifest["selection"]
+                    + "\n"
                     + manifest["note"],
                 )
             temporary.replace(archive)

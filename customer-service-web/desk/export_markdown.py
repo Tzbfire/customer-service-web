@@ -46,6 +46,8 @@ def message_markdown(value, stamp):
     result = f"## {heading(stamp)} · {heading(role)}\n\n"
     if value.get("platform_id"):
         result += f"消息 ID：{heading(value['platform_id'])}\n\n"
+    if value.get("export_change") == "updated":
+        result += "变更：更新（请按消息 ID 替换此前导出记录）。\n\n"
     if p.get("kind") == "withdrawn":
         return result + literal(body or "消息已撤回") + "\n"
     if p.get("quote"):
