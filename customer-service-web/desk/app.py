@@ -22,6 +22,7 @@ from .channels import ChannelError, Channels
 from .history import HistoryService, HistoryConflict
 from .transcript_sync import TranscriptSync
 from .exports import Exports, ExportConflict
+from .customer_prompt import DEFAULT_SYSTEM_PROMPT, MAX_SYSTEM_PROMPT
 from .products import Products
 from .learning import Learning, purchase_facts
 from .orders import Orders
@@ -69,7 +70,7 @@ class ModelSettings(BaseModel):
     allow_private: bool = False
     clear_api_key: bool = False
     use_local_keywords: bool = True
-    system_prompt: str = Field(default="", max_length=12000)
+    system_prompt: str = Field(default="", max_length=MAX_SYSTEM_PROMPT)
 
 
 class DocumentInput(BaseModel):
@@ -533,7 +534,13 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
         settings.setdefault("use_local_keywords", True)
         settings.setdefault("system_prompt", "")
         has_key = bool(settings.pop("api_key", ""))
-        return {**settings, "has_key": has_key}
+        return {
+            **settings,
+            "has_key": has_key,
+            "default_system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "system_prompt_is_default": not bool(settings["system_prompt"].strip()),
+            "system_prompt_max_length": MAX_SYSTEM_PROMPT,
+        }
 
     @app.post("/api/model")
     async def set_model(value: ModelSettings, user=Depends(administrator)):
@@ -548,6 +555,8 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        if values["system_prompt"].strip() == DEFAULT_SYSTEM_PROMPT.strip():
+            values["system_prompt"] = ""
         values["api_key"] = "" if value.clear_api_key else value.api_key or store.model().get("api_key", "")
         values.pop("clear_api_key")
         store.save_model(values)

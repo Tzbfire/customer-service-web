@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import asyncio
 import base64
 import csv
@@ -15,6 +16,7 @@ from pathlib import Path
 import jieba
 from PIL import Image, ImageOps
 
+from .customer_prompt import customer_prompt
 from .llm import ModelError, parse_object
 
 jieba.setLogLevel(logging.ERROR)
@@ -410,19 +412,32 @@ class Knowledge:
                 "需要人工核实或买家明确要求人工时，用 handoff 且 needs_human=true。"
                 "不要把无依据的商品回答标为 greeting 或 clarification。"
             )
-        business_prompt = settings.get("system_prompt", "").strip()
+        business_prompt = customer_prompt(settings)
         if business_prompt:
-            system = "商家设置的客服要求：\n" + business_prompt + "\n\n以下为工作台回复要求：\n" + system
+            system = (
+                "客服系统提示词（商家要求与历史参考）：\n"
+                + business_prompt
+                + "\n\n当前宿主为在线客服工作台。原文中离线草稿或未接业务系统是原环境说明，"
+                "本轮只生成回复，发送和人工接管由工作台执行；没有实际结果不声称操作完成。"
+                "当前店铺以本轮提供的名称和平台店铺ID为准，不跨店套用产品或政策。"
+                "内置历史知识仍需遵守各自的适用条件和待核实状态，不能代替当前订单或履约事实。"
+                "以下为工作台输出协议，优先按此返回 JSON，不能改为纯文本或其他字段：\n" + system
+            )
         messages = [{"role": "system", "content": system}]
         if history:
             messages.append(
                 {"role": "user", "content": "历史对话，仅用于理解上下文：\n" + json_text(history[-10:])}
             )
+        shop = self.store.one("SELECT name,platform_shop_id FROM shops WHERE id=?", (shop_id,))
         messages.append(
             {
                 "role": "user",
                 "content": json_text(
                     {
+                        "当前店铺": {
+                            "名称": shop["name"] if shop else "未知",
+                            "平台店铺ID": shop["platform_shop_id"] if shop else None,
+                        },
                         "当前商品ID": goods_id or "尚未确定，必要时询问买家",
                         "店铺资料": evidence,
                         "客户问题": question,

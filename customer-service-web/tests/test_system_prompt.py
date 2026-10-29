@@ -1,3 +1,8 @@
+import json
+
+import pytest
+
+from desk.customer_prompt import DEFAULT_SYSTEM_PROMPT, MAX_SYSTEM_PROMPT
 from desk.store import Store
 from test_ai_takeover import activate, receive, takeover as takeover
 from test_workflows import H, publish, system as system, upload
@@ -31,7 +36,7 @@ def test_system_prompt_roundtrip_preserves_key_and_survives_restart(system):
 def test_prompt_length_validation_does_not_overwrite_existing_prompt(system):
     client, _, _, _ = system
     assert save(client, system_prompt=PROMPT).status_code == 200
-    assert save(client, system_prompt="长" * 12001).status_code == 422
+    assert save(client, system_prompt="长" * 30001).status_code == 422
     assert client.get("/api/model").json()["system_prompt"] == PROMPT
 
 
@@ -79,3 +84,43 @@ def test_ocr_and_connection_check_do_not_use_customer_service_prompt(system):
     assert "转录" in calls[-1]["messages"][0]["content"]
     assert client.post("/api/model/test", headers=H).status_code == 200
     assert calls[-1]["messages"] == [{"role": "user", "content": "请只回复 OK"}]
+
+
+def test_bundled_prompt_is_complete_and_available_without_runtime_files(system):
+    client, _, _, _ = system
+    config = client.get("/api/model").json()
+    assert config["system_prompt_is_default"] is True
+    assert config["default_system_prompt"] == DEFAULT_SYSTEM_PROMPT
+    assert 12000 < len(DEFAULT_SYSTEM_PROMPT) < config["system_prompt_max_length"] == MAX_SYSTEM_PROMPT
+    assert "复古夯土涂料" in DEFAULT_SYSTEM_PROMPT and "隔禹新材料" in DEFAULT_SYSTEM_PROMPT
+    for index in range(1, 48):
+        assert f"## K{index:02d}" in DEFAULT_SYSTEM_PROMPT
+    assert save(client, system_prompt=DEFAULT_SYSTEM_PROMPT).status_code == 200
+    config = client.get("/api/model").json()
+    assert config["system_prompt"] == "" and config["system_prompt_is_default"] is True
+
+
+@pytest.mark.parametrize("name,mall_id", [("复古夯土涂料", "962880936"), ("隔禹新材料", "495485106")])
+def test_ai_takeover_uses_entire_default_prompt_and_current_shop_identity(takeover, name, mall_id):
+    client, app, calls, _, _ = takeover
+    app.state.store.execute("UPDATE shops SET name=?,platform_shop_id=? WHERE id=1", (name, mall_id))
+    activate(client)
+    receive(client, app)
+    messages = calls[-1]["messages"]
+    assert DEFAULT_SYSTEM_PROMPT.strip() in messages[0]["content"]
+    assert "reply_kind" in messages[0]["content"] and "工作台输出协议" in messages[0]["content"]
+    assert json.loads(messages[-1]["content"])["当前店铺"] == {"名称": name, "平台店铺ID": mall_id}
+
+
+def test_custom_prompt_replaces_default_and_clearing_restores_it(takeover):
+    client, app, calls, _, _ = takeover
+    assert save(client, system_prompt=PROMPT).status_code == 200
+    assert client.get("/api/model").json()["system_prompt_is_default"] is False
+    activate(client)
+    receive(client, app, identity="custom")
+    assert PROMPT in calls[-1]["messages"][0]["content"]
+    assert DEFAULT_SYSTEM_PROMPT.strip() not in calls[-1]["messages"][0]["content"]
+    assert save(client, system_prompt="   ").status_code == 200
+    assert client.get("/api/model").json()["system_prompt_is_default"] is True
+    receive(client, app, identity="default")
+    assert DEFAULT_SYSTEM_PROMPT.strip() in calls[-1]["messages"][0]["content"]
