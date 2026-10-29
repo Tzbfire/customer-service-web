@@ -237,7 +237,12 @@ def test_local_api_serves_persisted_media_and_csp_permits_only_platform_media(tm
         response = client.get(f"/api/conversations/{cid}")
         assert response.json()["messages"][0]["presentation"]["media"][0]["inline_url"].endswith("photo.jpg")
         csp = response.headers["Content-Security-Policy"]
-        assert "https://*.pddpic.com" in csp and "img-src *" not in csp and "media-src 'self'" in csp
+        assert (
+            "https://*.pddpic.com" in csp
+            and "https://chat-img.pddugc.com" in csp
+            and "img-src *" not in csp
+            and "media-src 'self'" in csp
+        )
 
 
 def test_conversation_preview_has_no_tracking_url_and_summarizes_cards():
@@ -247,3 +252,23 @@ def test_conversation_preview_has_no_tracking_url_and_summarizes_cards():
     )
     assert message_preview("old", {"kind": "image"}) == "【图片】"
     assert message_preview("old", {"product": {"name": "Sample"}}) == "【商品】Sample"
+
+
+@pytest.mark.parametrize("role", ["user", "mall_cs"])
+def test_chat_upload_cdn_images_have_inline_preview_for_both_senders(role):
+    url = "https://chat-img.pddugc.com/customer-service/photo.jpeg"
+    value = normalize_message(raw(1, content=url, **{"from": {"role": role, "uid": "fixture"}}))
+    assert value["presentation"]["media"][0]["inline_url"] == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://chat-img.pddugc.com.evil.test/photo.jpeg",
+        "https://evil.pddugc.com/photo.jpeg",
+        "http://chat-img.pddugc.com/photo.jpeg",
+        "https://user:secret@chat-img.pddugc.com/photo.jpeg",
+    ],
+)
+def test_chat_upload_allowlist_does_not_accept_lookalikes_or_insecure_urls(url):
+    assert media_url(url) is None

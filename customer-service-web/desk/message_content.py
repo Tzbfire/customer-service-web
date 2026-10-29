@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 MEDIA_DOMAINS = ("pddpic.com", "yangkeduo.com", "pinduoduo.com")
+MEDIA_HOSTS = {"chat-img.pddugc.com"}
 SYSTEM_TYPES = {20, 24, 30, 31, 41, 56, 97, 1002}
 
 
@@ -57,7 +58,12 @@ def media_url(value):
     if parsed.scheme != "https" or parsed.port not in (None, 443):
         return None
     host = parsed.hostname.lower()
-    return value if any(host == domain or host.endswith("." + domain) for domain in MEDIA_DOMAINS) else None
+    return (
+        value
+        if host in MEDIA_HOSTS
+        or any(host == domain or host.endswith("." + domain) for domain in MEDIA_DOMAINS)
+        else None
+    )
 
 
 def first(sources, *keys):

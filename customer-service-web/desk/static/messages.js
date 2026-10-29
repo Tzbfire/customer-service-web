@@ -8,7 +8,7 @@ export function safeURL(value, media = false) {
     if (!["https:", "http:"].includes(url.protocol) || url.username || url.password ||
         (url.port && !["80", "443"].includes(url.port))) return "";
     if (media && (url.protocol !== "https:" || (url.port && url.port !== "443") ||
-        !["pddpic.com", "yangkeduo.com", "pinduoduo.com"].some(domain => url.hostname === domain || url.hostname.endsWith("." + domain)))) return "";
+        !(url.hostname === "chat-img.pddugc.com" || ["pddpic.com", "yangkeduo.com", "pinduoduo.com"].some(domain => url.hostname === domain || url.hostname.endsWith("." + domain))))) return "";
     return url.href;
   } catch { return ""; }
 }

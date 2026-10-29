@@ -159,7 +159,7 @@ def create_app(directory=None, model_transport=None, channel_transport=None):
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' data: blob: https://*.pddpic.com https://*.yangkeduo.com https://*.pinduoduo.com; "
+            "img-src 'self' data: blob: https://*.pddpic.com https://*.yangkeduo.com https://*.pinduoduo.com https://chat-img.pddugc.com; "
             "media-src 'self' https://*.pddpic.com https://*.yangkeduo.com https://*.pinduoduo.com; "
             "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         )

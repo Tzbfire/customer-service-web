@@ -35,3 +35,15 @@ test('names and order fields remain readable without fabricated values', () => {
   assert.match(html, /待发货/);
   assert.doesNotMatch(html, /undefined|null/);
 });
+
+test('native client uploads and buyer uploads show previews even for old records missing inline_url', () => {
+  const url = 'https://chat-img.pddugc.com/customer-service/photo.jpeg';
+  assert.equal(safeURL(url, true), url);
+  for (const role of ['agent', 'customer']) {
+    const html = timelineMessage({role,content:'【图片消息】',presentation:{kind:'image',body:'【图片消息】',media:[{kind:'image',url,inline_url:null}]}});
+    assert.match(html, /<img /);
+    assert.match(html, /data-action="preview-message-image"/);
+  }
+  assert.equal(safeURL('https://chat-img.pddugc.com.evil.test/x', true), '');
+  assert.equal(safeURL('https://other.pddugc.com/x', true), '');
+});

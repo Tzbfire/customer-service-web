@@ -1,4 +1,4 @@
-import { buyerLabel, timelineMessage as renderMessage, conversationProduct, safeURL } from "./messages.js";
+import { buyerLabel, timelineMessage as renderMessage, conversationProduct, safeURL } from "./messages.js?v=20261029-chat-images";
 ("use strict");
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const esc = (value) =>
